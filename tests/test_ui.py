@@ -283,7 +283,7 @@ class FlashTests(Base):
         self.prep("new")
         path = os.path.join(self.tmp, "plan.json"); W.QFileDialog.next_path = path
         self.w.editor.b_save.click()
-        d = json.load(open(path)); fs = [s.get("file") for s in d["steps"] if s["type"] in ("driver", "download")]
+        d = json.load(open(path, encoding="utf-8")); fs = [s.get("file") for s in d["steps"] if s["type"] in ("driver", "download")]
         self.assertEqual(sorted(fs), ["app.bin", "drv.bin"])                  # relativised
         self.assertFalse(self.w.dirty)
         self.w.editor.b_clr.click(); self.assertTrue(self.w.dirty); self.assertEqual(self.w.editor.table.rowCount(), 0)

@@ -14,7 +14,7 @@ def expected_key(seed, level, serial, a, b):          # independent re-statement
     return bytes(s ^ serial[i % len(serial)] ^ ((a * 16 + b) & 0xFF) ^ level for i, s in enumerate(seed))
 
 
-@unittest.skipUnless(shutil.which("g++"), "g++ needed")
+@unittest.skipUnless(shutil.which("g++") and sys.platform.startswith("linux"), "needs g++ on Linux (mock .so)")
 class SerialFileTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
