@@ -5,6 +5,8 @@ sys.path.insert(0, HERE)
 import qt_stub
 qt_stub.install()
 from PyQt5 import QtWidgets as W          # the fake
+from zdiag.busstats import ChannelCfg
+from zdiag.devmgr import ConnError
 from zdiag.project import SIM_DEVICE, Project, new_step, sample_project
 from zdiag.crc import PRESETS
 from zdiag_ui.appctx import AppContext
@@ -20,8 +22,9 @@ W.QApplication([])
 def fresh_ctx():
     d = tempfile.mkdtemp()
     ctx = AppContext(d)
-    ctx.channel.device = SIM_DEVICE
     ctx.diag_cfg.settings.p2_ms = 800
+    ctx.dev.open(SIM_DEVICE)                                   # device manager: open + start channel 0
+    ctx.dev.start_channel(0, ChannelCfg(), ctx.diag_cfg.addr, ctx.channel.sim_profile)
     return ctx
 
 
@@ -35,7 +38,7 @@ class Base(unittest.TestCase):
         W.QMessageBox.next_answer = W.QMessageBox.Yes
         W.QFileDialog.next_path = ""
         self.ctx = fresh_ctx()
-        self.addCleanup(self.ctx.conn.close)
+        self.addCleanup(self.ctx.dev.shutdown)
 
     def tree_item(self, win, sid, sub=None):
         for i in range(win.tree.topLevelItemCount()):
@@ -51,6 +54,82 @@ class Base(unittest.TestCase):
 
 
 class LauncherTests(Base):
+    def _fresh_launcher(self):
+        self.ctx.dev.shutdown()
+        return LauncherWindow(self.ctx)
+
+    def test_device_toggle_and_channel_panels(self):
+        w = self._fresh_launcher()
+        self.assertEqual((w.b_device.text(), w.c_device.isEnabled(), w.panels), ("打开", True, []))
+        w.c_device.setCurrentText(SIM_DEVICE); w.b_device.click()
+        self.assertEqual((w.b_device.text(), w.c_device.isEnabled()), ("关闭", False))   # one-way toggle, device locked
+        self.assertEqual([p.isVisible() for p in w.panels], [True, True])
+        self.assertEqual([p.b_toggle.text() for p in w.panels], ["启动", "启动"])
+        w.b_device.click()
+        self.assertEqual((w.b_device.text(), w.c_device.isEnabled()), ("打开", True))
+        self.assertEqual([p.isVisible() for p in w.panels], [False, False])
+        w.close()
+
+    def test_channel_start_stop_counters_and_load(self):
+        from zdiag_ui import dialogs
+        w = self._fresh_launcher()
+        w.c_device.setCurrentText(SIM_DEVICE); w.b_device.click()
+        def fake_exec(dlg):                                       # user fills the dialog and presses 启动
+            dlg.c_baud.setCurrentText("250"); dlg.c_mode.setCurrentIndex(0)
+            dlg.k_load.setChecked(True); dlg.e_interval.setText("200"); dlg._on_ok(); return 1
+        old = dialogs.ChannelConfigDialog.exec_; dialogs.ChannelConfigDialog.exec_ = fake_exec
+        self.addCleanup(setattr, dialogs.ChannelConfigDialog, "exec_", old)
+        p = w.panels[0]
+        p.b_toggle.click()
+        self.assertEqual((p.b_toggle.text(), self.ctx.dev.cfg_of(0).bitrate_kbps), ("停止", 250.0))
+        self.assertIn("CAN 250k", p.l_state.text())
+        self.assertEqual(self.ctx.chan_cfgs[0].bitrate_kbps, 250.0)                      # remembered
+        win = DiagWindow(self.ctx)
+        win.tree.setCurrentItem(self.tree_item(win, 0x10, 3)); win.e_pdu.setText("10 03"); win.b_now.click()
+        w.refresh_stats()
+        self.assertNotEqual(p.l_tx.text(), "发送: 0"); self.assertNotEqual(p.l_rx.text(), "接收: 0")
+        self.assertEqual(p.l_err.text(), "错误: 0")
+        import time; self.ctx.dev.stats_of(0).sample_load(time.monotonic())
+        w.refresh_stats(); self.assertIn("总线负载", p.l_load.text())
+        win.close()
+        p.b_toggle.click()
+        self.assertEqual((p.b_toggle.text(), p.l_rx.text(), p.l_load.text()), ("启动", "接收: 0", "总线负载: --"))
+        w.close()
+
+    def test_channel_stop_blocked_while_window_uses_it(self):
+        from zdiag_ui import dialogs
+        w = self._fresh_launcher()
+        w.c_device.setCurrentText(SIM_DEVICE); w.b_device.click()
+        old = dialogs.ChannelConfigDialog.exec_
+        dialogs.ChannelConfigDialog.exec_ = lambda dlg: (dlg._on_ok(), 1)[1]
+        self.addCleanup(setattr, dialogs.ChannelConfigDialog, "exec_", old)
+        w.panels[1].b_toggle.click()
+        self.ctx.dev.acquire(1, "someone", self.ctx.diag_cfg.addr)
+        W.QMessageBox.calls.clear()
+        w.panels[1].b_toggle.click(); w.b_device.click()
+        self.assertEqual(len(msgs("warn")), 2); self.assertEqual(self.ctx.dev.started(), [1])
+        self.ctx.dev.release("someone")
+        w.b_device.click(); self.assertFalse(self.ctx.dev.is_open)
+        w.close()
+
+    def test_diag_and_flash_windows_follow_started_channels(self):
+        win, fw = DiagWindow(self.ctx), FlashWindow(self.ctx)
+        self.assertEqual(win.c_ch.count(), 1); self.assertIn("通道0", win.c_ch.currentText())
+        self.ctx.dev.start_channel(1, ChannelCfg(protocol="CAN FD"), self.ctx.diag_cfg.addr)
+        self.assertEqual(win.c_ch.count(), 2); self.assertEqual(fw.executor.c_ch.count(), 2)
+        win.c_ch.setCurrentIndex(1)
+        self.assertEqual(self.ctx.channel.channel, 1)
+        self.ctx.dev.stop_channel(1)                              # selected channel disappears -> falls back
+        self.assertEqual((win.c_ch.count(), self.ctx.channel.channel), (1, 0))
+        self.ctx.dev.stop_channel(0)
+        self.assertEqual(win.c_ch.currentText(), "(无已启动通道)")
+        W.QMessageBox.calls.clear()
+        win.tree.setCurrentItem(self.tree_item(win, 0x10, 3)); win.e_pdu.setText("10 03"); win.b_now.click()
+        self.assertIn("启动", msgs("warn")[0][2])                  # nothing started -> tells the user what to do
+        n = len(self.ctx.dev.listeners)
+        win.close(); fw.close()
+        self.assertEqual(len(self.ctx.dev.listeners), n - 2)       # windows unsubscribe when closed
+
     def test_opens_all_tools(self):
         w = LauncherWindow(self.ctx)
         for k in ("uds", "flash", "crc"):
@@ -158,19 +237,22 @@ class DiagWindowTests(Base):
         self.assertEqual(w.counts["pass"], 1)            # a new simulator was built for the new IDs
 
     def test_no_zlg_dll_gives_clear_message(self):
-        self.ctx.channel.device = "USBCAN-II"
-        self.send("10 03", "50")
-        self.assertIn("zlgcan.dll", msgs("warn")[0][2]); self.assertEqual(self.w.counts["tested"], 0)
+        self.ctx.dev.shutdown()
+        with self.assertRaises(ConnError) as e:
+            self.ctx.dev.open("USBCAN-II")
+        self.assertIn("zlgcan.dll", str(e.exception))
+        self.send("10 03", "50")                                  # no started channel -> clear message
+        self.assertIn("启动", msgs("warn")[0][2]); self.assertEqual(self.w.counts["tested"], 0)
 
     def test_settings_dialog_roundtrip_and_validation(self):
         cfg, ch = self.ctx.diag_cfg, self.ctx.channel
         d = SettingsDialog(self.ctx, cfg, ch)
         self.assertEqual(d.e_phys.text(), "7e2"); self.assertEqual(d.a_p2.text(), "800")
         d.a_p2.setText("1234"); d.a_pad_on.setChecked(False); d.k_on.setChecked(True); d.k_period.setText("500")
-        d.s_map.setText("7e2:5,6; 7e8:2,4"); d.ch_baud.setText("250000"); d.ch_sim.setCurrentIndex(1)
+        d.s_map.setText("7e2:5,6; 7e8:2,4"); d.ch_fddl.setCurrentText("32"); d.ch_sim.setCurrentIndex(1)
         d.btn_ok.click()
         self.assertEqual((cfg.settings.p2_ms, cfg.settings.padding_enabled, cfg.keepalive.period_ms), (1234, False, 500))
-        self.assertEqual(cfg.serial_id_map["7e2"], [5, 6]); self.assertEqual((ch.bitrate, ch.sim_profile), (250000, "old"))
+        self.assertEqual(cfg.serial_id_map["7e2"], [5, 6]); self.assertEqual((ch.fd_dl, ch.sim_profile), (32, "old"))
         d2 = SettingsDialog(self.ctx, cfg, ch)
         d2.a_p2.setText("abc"); d2.e_phys.setText("1fff")
         W.QMessageBox.calls.clear(); d2.btn_ok.click()
@@ -301,7 +383,7 @@ class FlashTests(Base):
         self.assertTrue(msgs("info")[-1][1] == "完成")
         types = {ex.table.item(r, 1).text() for r in range(ex.table.rowCount())}
         self.assertTrue({"请求", "响应", "信息", "完成"} <= types)
-        ecu = self.ctx.conn.ecu
+        ecu = self.ctx.dev.sim_ecu(0)
         self.assertEqual(ecu.reset_count, 1); self.assertEqual(ecu.crc_checked, [(0x0102, True)]); self.assertEqual(len(ecu.seed), 16)
         data = open(self.fw, "rb").read()
         self.assertEqual(bytes(ecu.mem[i] for i in range(len(data))), data)
@@ -309,7 +391,7 @@ class FlashTests(Base):
     def test_full_flash_old_product_via_gui(self):
         self.prep("old")
         self.run_exec()
-        ecu = self.ctx.conn.ecu
+        ecu = self.ctx.dev.sim_ecu(0)
         self.assertEqual(self.card_colors(), [qt_color("#5FAE5B")] * 9)
         self.assertEqual((len(ecu.seed), ecu.crc_checked), (2, [(0xDFFE, True)]))
 
@@ -322,20 +404,20 @@ class FlashTests(Base):
         cols = self.card_colors()
         self.assertEqual(cols[:7], [qt_color("#5FAE5B")] * 7); self.assertEqual(cols[7], qt_color("#D9534F"))
         self.assertEqual(cols[8], qt_color("#6C8EBF"))                    # never ran
-        self.assertEqual(self.ctx.conn.ecu.reset_count, 0)
+        self.assertEqual(self.ctx.dev.sim_ecu(0).reset_count, 0)
         self.assertTrue(msgs("warn"))
 
     def test_preflight_blocks_start_and_lists_problems(self):
         self.prep("new", lambda p: [s.__setitem__("file", "/no/such.bin") for s in p.steps if s["type"] == "download"])
         self.run_exec()
         self.assertEqual(len(msgs("warn")), 1); self.assertIn("步骤7", msgs("warn")[0][2])
-        self.assertIsNone(self.ctx.conn.bus)                              # never touched the device
+        self.assertEqual(self.ctx.dev.owners, {})                         # never touched the device
 
     def test_repeat_count_and_gap(self):
         self.prep("old")
         self.w.executor.s_n.setValue(2)
         self.run_exec()
-        self.assertEqual(self.ctx.conn.ecu.reset_count, 2)
+        self.assertEqual(self.ctx.dev.sim_ecu(0).reset_count, 2)
 
     def test_executor_open_file_and_address_edit(self):
         self.prep("new")

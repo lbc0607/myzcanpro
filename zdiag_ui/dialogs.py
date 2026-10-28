@@ -4,7 +4,9 @@ from typing import Dict, List, Optional
 
 from zdiag.crc import CUSTOM, PRESETS, CrcSpec, crc_calc, preset_names
 from zdiag.flash import load_image
-from zdiag.project import DEVICES, SIM_DEVICE, Channel, DiagConfig, parse_hex, parse_id
+from zdiag.busstats import ChannelCfg
+from zdiag.devmgr import bitrate_choices_kbps, has_terminator, is_fd_device
+from zdiag.project import Channel, DiagConfig, parse_hex, parse_id
 from .common import hex_edit, info, int_of, pick_file, warn
 from .qt import Qt, QtWidgets as W
 
@@ -24,7 +26,7 @@ class SettingsDialog(W.QDialog):
         self.tabs.addTab(self._general_tab(), "常规设置")
         self.tabs.addTab(self._advanced_tab(), "高级设置")
         if with_channel:
-            self.tabs.addTab(self._channel_tab(), "通道设置")
+            self.tabs.addTab(self._channel_tab(), "其他设置")
         self.tabs.addTab(self._security_tab(), "安全访问")
         btns = W.QHBoxLayout()
         btns.addStretch(1)
@@ -114,31 +116,24 @@ class SettingsDialog(W.QDialog):
         return w
 
     def _channel_tab(self):
+        """Only what is NOT in the device manager: ISO-TP FD frame length, zlgcan.dll path, simulator product."""
         w = W.QWidget()
         g = W.QGridLayout(w)
-        self.ch_dev = W.QComboBox()
-        self.ch_dev.addItems(DEVICES)
-        self.ch_idx, self.ch_ch = W.QLineEdit(), W.QLineEdit()
-        self.ch_type = W.QComboBox()
-        self.ch_type.addItems(["CAN", "CAN FD"])
-        self.ch_baud, self.ch_dbaud = W.QLineEdit(), W.QLineEdit()
-        self.ch_term = W.QCheckBox("使能终端电阻")
         self.ch_fddl = W.QComboBox()
         self.ch_fddl.addItems(["8", "12", "16", "20", "24", "32", "48", "64"])
         self.ch_dll, self.ch_dll_btn = W.QLineEdit(), W.QPushButton("浏览")
         self.ch_sim = W.QComboBox()
         self.ch_sim.addItem("新产品 (16字节seed, 例程 01 02)", "new")
         self.ch_sim.addItem("旧产品 (2字节seed, 例程 DF FE)", "old")
-        items = [("设备:", self.ch_dev), ("设备索引:", self.ch_idx), ("通道:", self.ch_ch),
-                 ("CAN类型:", self.ch_type), ("波特率(bit/s):", self.ch_baud),
-                 ("数据域波特率(bit/s):", self.ch_dbaud), ("ISO-TP帧长(CAN FD):", self.ch_fddl),
-                 ("zlgcan.dll 路径:", self.ch_dll), ("模拟ECU 产品:", self.ch_sim)]
+        items = [("ISO-TP帧长(通道为CAN FD时):", self.ch_fddl), ("zlgcan.dll 路径:", self.ch_dll),
+                 ("模拟ECU 产品:", self.ch_sim)]
         for r, (lab, wd) in enumerate(items):
             g.addWidget(W.QLabel(lab), r, 0)
             g.addWidget(wd, r, 1)
-        g.addWidget(self.ch_dll_btn, 7, 2)
-        g.addWidget(self.ch_term, len(items), 1)
-        g.addWidget(W.QLabel("留空则使用程序目录下的 zlgcan.dll；kerneldlls 文件夹需与之放在一起。"), len(items) + 1, 0, 1, 3)
+        g.addWidget(self.ch_dll_btn, 1, 2)
+        g.addWidget(W.QLabel("设备、通道、CAN/CAN FD、波特率、终端电阻等请在主界面的「设备管理」中设置。\n"
+                             "zlgcan.dll 留空则依次查找程序目录、vendor 目录；kerneldlls 需与之放在一起。"),
+                    len(items), 0, 1, 3)
         self.ch_dll_btn.clicked.connect(self._browse_dll)
         return w
 
@@ -190,14 +185,7 @@ class SettingsDialog(W.QDialog):
         self.s_map.setText("; ".join(f"{k_}:{v_[0]},{v_[1]}" for k_, v_ in c.serial_id_map.items()))
         if self.with_channel:
             ch = self.channel
-            self.ch_dev.setCurrentText(ch.device)
-            self.ch_idx.setText(str(ch.index))
-            self.ch_ch.setText(str(ch.channel))
-            self.ch_type.setCurrentText(ch.can_type)
-            self.ch_baud.setText(str(ch.bitrate))
-            self.ch_dbaud.setText(str(ch.data_bitrate))
             self.ch_fddl.setCurrentText(str(ch.fd_dl))
-            self.ch_term.setChecked(ch.terminator)
             self.ch_dll.setText(ch.zlgcan_dll)
             self.ch_sim.setCurrentIndex(0 if ch.sim_profile == "new" else 1)
 
@@ -245,12 +233,8 @@ class SettingsDialog(W.QDialog):
         id_map = self.parse_id_map(self.s_map.text())
         chv = None
         if self.with_channel:
-            chv = dict(device=self.ch_dev.currentText(), index=int_of(self.ch_idx, "设备索引", 0, 63),
-                       channel=int_of(self.ch_ch, "通道", 0, 15), can_type=self.ch_type.currentText(),
-                       bitrate=int_of(self.ch_baud, "波特率", 1000, 8000000),
-                       data_bitrate=int_of(self.ch_dbaud, "数据域波特率", 1000, 12000000),
-                       fd_dl=int(self.ch_fddl.currentText()), terminator=self.ch_term.isChecked(),
-                       zlgcan_dll=self.ch_dll.text().strip(), sim_profile=self.ch_sim.currentData() or "new")
+            chv = dict(fd_dl=int(self.ch_fddl.currentText()), zlgcan_dll=self.ch_dll.text().strip(),
+                       sim_profile=self.ch_sim.currentData() or "new")
         # ---- commit
         ad = self.cfg.addr
         ad.phys, ad.func, ad.resp = a
@@ -270,6 +254,82 @@ class SettingsDialog(W.QDialog):
         if chv:
             for k_, v_ in chv.items():
                 setattr(self.channel, k_, v_)
+
+
+# =============================================================================== 通道配置(启动)
+class ChannelConfigDialog(W.QDialog):
+    """Shown when the user clicks 启动 on a channel: protocol / baud rate / mode / terminator / bus load."""
+
+    def __init__(self, device: str, channel: int, cfg: ChannelCfg, parent=None) -> None:
+        super().__init__(parent)
+        self.device, self.channel = device, channel
+        self.result_cfg: Optional[ChannelCfg] = None
+        self.setWindowTitle(f"通道{channel} 配置 - {device}")
+        g = W.QGridLayout(self)
+        fd = is_fd_device(device)
+        self.c_proto = W.QComboBox()
+        self.c_proto.addItems(["CAN", "CAN FD"] if fd else ["CAN"])
+        self.c_baud, self.c_dbaud = W.QComboBox(), W.QComboBox()
+        for c, vals in ((self.c_baud, bitrate_choices_kbps(device)),
+                        (self.c_dbaud, [8000, 5000, 4000, 2000, 1000, 800, 500, 250, 125, 100])):
+            c.setEditable(fd)                      # USBCAN-II only has the fixed timing table
+            for v in vals:
+                c.addItem(f"{v:g}")
+        self.c_mode = W.QComboBox()
+        self.c_mode.addItems(["正常模式", "只听模式"])
+        self.k_term = W.QCheckBox("打开终端电阻")
+        self.k_load = W.QCheckBox("计算总线负载率")
+        self.e_interval = W.QLineEdit()
+        self.e_interval.setFixedWidth(80)
+        rows = [("协议:", self.c_proto), ("波特率(kbaud/s):", self.c_baud), ("数据域波特率(kbaud/s):", self.c_dbaud),
+                ("工作模式:", self.c_mode)]
+        for r, (lab, wd) in enumerate(rows):
+            g.addWidget(W.QLabel(lab), r, 0)
+            g.addWidget(wd, r, 1, 1, 2)
+        g.addWidget(self.k_term, 4, 0, 1, 3)
+        g.addWidget(self.k_load, 5, 0, 1, 3)
+        g.addWidget(W.QLabel("刷新时间(ms):"), 6, 0)
+        g.addWidget(self.e_interval, 6, 1)
+        self.b_ok, self.b_cancel = W.QPushButton("启动"), W.QPushButton("取消")
+        g.addWidget(self.b_ok, 7, 1)
+        g.addWidget(self.b_cancel, 7, 2)
+        if not has_terminator(device):
+            self.k_term.setEnabled(False)
+            self.k_term.setText("终端电阻(此设备无软件控制，请用硬件跳线)")
+        self.c_proto.currentIndexChanged.connect(self._sync)
+        self.k_load.toggled.connect(self._sync)
+        self.b_ok.clicked.connect(self._on_ok)
+        self.b_cancel.clicked.connect(self.reject)
+        self.c_proto.setCurrentText(cfg.protocol if fd else "CAN")
+        self.c_baud.setCurrentText(f"{cfg.bitrate_kbps:g}")
+        self.c_dbaud.setCurrentText(f"{cfg.data_kbps:g}")
+        self.c_mode.setCurrentIndex(1 if cfg.listen_only else 0)
+        self.k_term.setChecked(cfg.terminator and has_terminator(device))
+        self.k_load.setChecked(cfg.calc_load)
+        self.e_interval.setText(str(cfg.load_interval_ms))
+        self._sync()
+
+    def _sync(self, *_) -> None:
+        is_fd = self.c_proto.currentText() == "CAN FD"
+        self.c_dbaud.setEnabled(is_fd)
+        self.e_interval.setEnabled(self.k_load.isChecked())
+
+    def _on_ok(self) -> None:
+        try:
+            cfg = ChannelCfg(
+                protocol=self.c_proto.currentText(),
+                bitrate_kbps=float(self.c_baud.currentText()),
+                data_kbps=float(self.c_dbaud.currentText()) if self.c_proto.currentText() == "CAN FD" else 2000.0,
+                listen_only=self.c_mode.currentIndex() == 1,
+                terminator=self.k_term.isChecked(),
+                calc_load=self.k_load.isChecked(),
+                load_interval_ms=int_of(self.e_interval, "刷新时间", 20, 10000) if self.k_load.isChecked() else 200)
+            cfg.validate()
+        except ValueError as e:
+            warn(self, f"配置无效: {e}")
+            return
+        self.result_cfg = cfg
+        self.accept()
 
 
 # =============================================================================== CRC widgets

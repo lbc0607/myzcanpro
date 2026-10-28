@@ -6,9 +6,9 @@ import time
 from typing import Dict, List, Optional
 
 from zdiag.engine import LogEvent, preflight
-from zdiag.project import DEVICES, Project, fmt_hex, new_step, parse_id, sample_project, step_summary
+from zdiag.project import Project, fmt_hex, new_step, parse_id, sample_project, step_summary
 from .appctx import ConnError
-from .common import Bridge, Worker, event_row, info, pick_file, save_file, warn
+from .common import fill_channel_combo, Bridge, Worker, event_row, info, pick_file, save_file, warn
 from .dialogs import CrcToolDialog, ServiceEditorDialog, SettingsDialog
 from .flash_forms import make_form
 from .logsaver import LogSaver
@@ -69,13 +69,11 @@ class FlashEditorTab(W.QWidget):
         for b in (self.b_new, self.b_open, self.b_save, self.b_export, self.b_apply):
             h.addWidget(b)
         h.addStretch(1)
-        self.c_can = W.QComboBox()
-        self.c_can.addItems(["CAN", "CAN FD"])
         self.e_phys, self.e_func, self.e_resp = W.QLineEdit(), W.QLineEdit(), W.QLineEdit()
         for e in (self.e_phys, self.e_func, self.e_resp):
             e.setFixedWidth(84)
         self.b_more, self.b_svc, self.b_crc = W.QPushButton("更多设置"), W.QPushButton("服务编辑器"), W.QPushButton("校验码工具")
-        for wd in (W.QLabel("CAN类型:"), self.c_can, W.QLabel("地址:"), self.e_phys, self.e_func, self.e_resp,
+        for wd in (W.QLabel("地址:"), self.e_phys, self.e_func, self.e_resp,
                    self.b_more, self.b_svc, self.b_crc):
             h.addWidget(wd)
         v.addWidget(bar)
@@ -113,7 +111,6 @@ class FlashEditorTab(W.QWidget):
         self.b_save.clicked.connect(self.win.save_project)
         self.b_export.clicked.connect(self.win.save_project_as)
         self.b_apply.clicked.connect(self.win.apply_to_executor)
-        self.c_can.currentIndexChanged.connect(self._on_can)
         for e in (self.e_phys, self.e_func, self.e_resp):
             e.editingFinished.connect(self._commit_addr)
         self.b_more.clicked.connect(self._more)
@@ -163,7 +160,6 @@ class FlashEditorTab(W.QWidget):
     def refresh(self, select: int = -1) -> None:
         p = self.project
         self._loading = True
-        self.c_can.setCurrentIndex(1 if p.can_type == "CAN FD" else 0)
         a = p.cfg.addr
         self.e_phys.setText(f"{a.phys:x}")
         self.e_func.setText(f"{a.func:x}")
@@ -181,11 +177,6 @@ class FlashEditorTab(W.QWidget):
         self._loading = False
         if 0 <= select < len(p.steps):
             self.table.selectRow(select)
-
-    def _on_can(self, *_) -> None:
-        if not self._loading:
-            self.project.can_type = self.c_can.currentText()
-            self.win.mark_dirty()
 
     def _commit_addr(self) -> None:
         if self._loading:
@@ -331,15 +322,15 @@ class FlashExecutorTab(W.QWidget):
         self.bridge.event.connect(self._on_event)
         self.bridge.step.connect(self._on_step)
         self.bridge.progress.connect(self._on_progress)
+        self.ctx.dev.add_listener(self.on_dev_change)
 
     def _build(self) -> None:
         v = W.QVBoxLayout(self)
         bar = W.QFrame()
         bar.setObjectName("panel")
         h = W.QHBoxLayout(bar)
-        self.c_dev, self.c_ch = W.QComboBox(), W.QComboBox()
-        self.c_dev.addItems(DEVICES)
-        self.c_ch.addItems([f"通道{i}" for i in range(4)])
+        self.c_ch = W.QComboBox()                       # the channels started in the main window's 设备管理
+        self.c_ch.setMinimumWidth(170)
         self.e_path = W.QLineEdit()
         self.e_path.setReadOnly(True)
         self.b_open, self.b_more = W.QPushButton("打开文件"), W.QPushButton("更多设置")
@@ -347,7 +338,6 @@ class FlashExecutorTab(W.QWidget):
         for e in (self.e_phys, self.e_func, self.e_resp):
             e.setFixedWidth(84)
         h.addWidget(W.QLabel("通道:"))
-        h.addWidget(self.c_dev)
         h.addWidget(self.c_ch)
         h.addWidget(self.e_path, 1)
         h.addWidget(self.b_open)
@@ -404,7 +394,6 @@ class FlashExecutorTab(W.QWidget):
         self.b_clear.clicked.connect(self._clear)
         self.b_save.toggled.connect(self._toggle_save)
         self.b_export.clicked.connect(self._export)
-        self.c_dev.currentIndexChanged.connect(self._on_channel)
         self.c_ch.currentIndexChanged.connect(self._on_channel)
         for e in (self.e_phys, self.e_func, self.e_resp):
             e.editingFinished.connect(self._commit_addr)
@@ -432,13 +421,7 @@ class FlashExecutorTab(W.QWidget):
         self.e_phys.setText(f"{a.phys:x}")
         self.e_func.setText(f"{a.func:x}")
         self.e_resp.setText(f"{a.resp:x}")
-        ch = self.ctx.channel
-        self.c_dev.blockSignals(True)
-        self.c_ch.blockSignals(True)
-        self.c_dev.setCurrentText(ch.device)
-        self.c_ch.setCurrentIndex(min(ch.channel, 3))
-        self.c_dev.blockSignals(False)
-        self.c_ch.blockSignals(False)
+        fill_channel_combo(self.c_ch, self.ctx.dev, self.ctx.channel.channel)
 
     @staticmethod
     def _paint(item, color: str) -> None:
@@ -454,10 +437,16 @@ class FlashExecutorTab(W.QWidget):
                 warn(self, f"打开失败: {e}")
 
     def _on_channel(self, *_) -> None:
-        self.ctx.channel.device = self.c_dev.currentText()
-        self.ctx.channel.channel = self.c_ch.currentIndex()
-        self._drop_session()
-        self.ctx.save()
+        n = self.c_ch.currentData()
+        if n is not None and n >= 0 and n != self.ctx.channel.channel:
+            self.ctx.channel.channel = n
+            self._drop_session()
+            self.ctx.save()
+
+    def on_dev_change(self) -> None:
+        n = fill_channel_combo(self.c_ch, self.ctx.dev, self.ctx.channel.channel)
+        if n >= 0 and n != self.ctx.channel.channel:
+            self.ctx.channel.channel = n
 
     def _commit_addr(self) -> None:
         try:
@@ -481,7 +470,7 @@ class FlashExecutorTab(W.QWidget):
         if self.session is not None:
             self.session.close()
             self.session = None
-        self.ctx.conn.release(self)
+        self.ctx.dev.release(self)
 
     def running(self) -> bool:
         return self.worker is not None and self.worker.isRunning()
@@ -532,7 +521,7 @@ class FlashExecutorTab(W.QWidget):
 
     def _on_finished(self) -> None:
         self.b_start.setText("开始刷写")
-        self.ctx.conn.release(self)
+        self.ctx.dev.release(self)
 
     # -- feedback
     def _on_step(self, i: int, status: str, detail: str) -> None:
@@ -586,6 +575,7 @@ class FlashExecutorTab(W.QWidget):
                 f.write("\n".join(e.line() for e in self.events))
 
     def shutdown(self) -> None:
+        self.ctx.dev.remove_listener(self.on_dev_change)
         self.cancel.set()
         self._drop_session()
         self.saver.stop()

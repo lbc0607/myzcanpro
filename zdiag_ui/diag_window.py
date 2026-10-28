@@ -5,9 +5,9 @@ import time
 from typing import Dict, List, Optional
 
 from zdiag.engine import DiagSession, LogEvent, match_expect
-from zdiag.project import DEVICES, fmt_hex, parse_hex, parse_id
+from zdiag.project import fmt_hex, parse_hex, parse_id
 from .appctx import ConnError
-from .common import Bridge, Worker, event_row, info, pick_file, save_file, warn
+from .common import fill_channel_combo, Bridge, Worker, event_row, info, pick_file, save_file, warn
 from .dialogs import ServiceEditorDialog, SettingsDialog
 from .logsaver import LogSaver
 from .qt import Qt, QtWidgets as W, Signal
@@ -38,6 +38,7 @@ class DiagWindow(W.QMainWindow):
         self._sync_top()
         self.bridge.event.connect(self._on_event)
         self.stat.connect(self._on_stat)
+        self.ctx.dev.add_listener(self._on_dev_change)
 
     # ------------------------------------------------------------------ UI construction
     def _build(self) -> None:
@@ -48,9 +49,8 @@ class DiagWindow(W.QMainWindow):
         top = W.QFrame()
         top.setObjectName("panel")
         h = W.QHBoxLayout(top)
-        self.c_dev, self.c_ch = W.QComboBox(), W.QComboBox()
-        self.c_dev.addItems(DEVICES)
-        self.c_ch.addItems([f"通道{i}" for i in range(4)])
+        self.c_ch = W.QComboBox()                       # the channels started in the main window's 设备管理
+        self.c_ch.setMinimumWidth(170)
         self.e_phys, self.e_func, self.e_resp = W.QLineEdit(), W.QLineEdit(), W.QLineEdit()
         for e in (self.e_phys, self.e_func, self.e_resp):
             e.setFixedWidth(84)
@@ -59,7 +59,7 @@ class DiagWindow(W.QMainWindow):
         self.b_more = W.QPushButton("更多设置")
         self.k_fc = W.QCheckBox("自动流控")
         self.b_svc, self.b_dtc = W.QPushButton("服务编辑器"), W.QPushButton("故障码编辑器")
-        for wd in (W.QLabel("通道:"), self.c_dev, self.c_ch, W.QLabel("  地址:"), self.e_phys, self.e_func,
+        for wd in (W.QLabel("通道:"), self.c_ch, W.QLabel("  地址:"), self.e_phys, self.e_func,
                    self.e_resp, self.c_addr, self.b_more, self.k_fc):
             h.addWidget(wd)
         h.addStretch(1)
@@ -157,7 +157,6 @@ class DiagWindow(W.QMainWindow):
         l3.addLayout(st)
         right.addWidget(f3, 3)
         # ---- wiring
-        self.c_dev.currentIndexChanged.connect(self._on_channel)
         self.c_ch.currentIndexChanged.connect(self._on_channel)
         for e in (self.e_phys, self.e_func, self.e_resp):
             e.editingFinished.connect(self._commit_addr)
@@ -187,12 +186,7 @@ class DiagWindow(W.QMainWindow):
     # ------------------------------------------------------------------ top bar <-> config
     def _sync_top(self) -> None:
         a = self.cfg.addr
-        self.c_dev.blockSignals(True)
-        self.c_ch.blockSignals(True)
-        self.c_dev.setCurrentText(self.ch.device)
-        self.c_ch.setCurrentIndex(min(self.ch.channel, 3))
-        self.c_dev.blockSignals(False)
-        self.c_ch.blockSignals(False)
+        fill_channel_combo(self.c_ch, self.ctx.dev, self.ch.channel)
         self.e_phys.setText(f"{a.phys:x}")
         self.e_func.setText(f"{a.func:x}")
         self.e_resp.setText(f"{a.resp:x}")
@@ -202,10 +196,17 @@ class DiagWindow(W.QMainWindow):
         self.log.setMaximumBlockCount(self.cfg.settings.max_log_lines)
 
     def _on_channel(self, *_) -> None:
-        self.ch.device = self.c_dev.currentText()
-        self.ch.channel = self.c_ch.currentIndex()
-        self._drop_session()
-        self.ctx.save()
+        n = self.c_ch.currentData()
+        if n is not None and n >= 0 and n != self.ch.channel:
+            self.ch.channel = n
+            self._drop_session()
+            self.ctx.save()
+
+    def _on_dev_change(self) -> None:
+        """Device manager state changed (channel started/stopped, device closed)."""
+        n = fill_channel_combo(self.c_ch, self.ctx.dev, self.ch.channel)
+        if n >= 0 and n != self.ch.channel:
+            self.ch.channel = n
 
     def _commit_addr(self) -> None:
         try:
@@ -275,7 +276,7 @@ class DiagWindow(W.QMainWindow):
         if self.session is not None:
             self.session.close()
             self.session = None
-        self.ctx.conn.release(self)
+        self.ctx.dev.release(self)
 
     def _ensure_session(self) -> bool:
         if self.session is not None:
@@ -316,7 +317,7 @@ class DiagWindow(W.QMainWindow):
         self.b_now.setEnabled(True)
         self.b_list.setText("列表发送")
         if not self.cfg.keepalive.enabled:
-            self.ctx.conn.release(self)
+            self.ctx.dev.release(self)
 
     # ------------------------------------------------------------------ requests
     def _read_request(self) -> Optional[Dict]:
@@ -553,6 +554,7 @@ class DiagWindow(W.QMainWindow):
 
     # ------------------------------------------------------------------ lifecycle
     def closeEvent(self, event) -> None:
+        self.ctx.dev.remove_listener(self._on_dev_change)
         self.cancel.set()
         self._drop_session()
         self.saver.stop()

@@ -100,3 +100,19 @@ def event_row(e: LogEvent, fmt: str = "hex") -> List[str]:
 
 def fmt_time(ts: float) -> str:
     return time.strftime("%H:%M:%S", time.localtime(ts)) + f".{int(ts * 1000) % 1000:03d}"
+
+
+def fill_channel_combo(combo, dev, wanted: int) -> int:
+    """List the STARTED channels of the device manager in `combo`; returns the selected channel number
+    (-1 when nothing is started)."""
+    combo.blockSignals(True)
+    combo.clear()
+    started = dev.started()
+    for n in started:
+        combo.addItem(f"通道{n} ({dev.cfg_of(n).summary()})", n)
+    if not started:
+        combo.addItem("(无已启动通道)", -1)
+    idx = combo.findData(wanted)
+    combo.setCurrentIndex(idx if idx >= 0 else 0)
+    combo.blockSignals(False)
+    return combo.currentData() if combo.currentData() is not None else -1

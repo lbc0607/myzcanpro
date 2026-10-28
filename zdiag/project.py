@@ -105,14 +105,8 @@ class Settings:
 
 @dataclass
 class Channel:
-    device: str = "USBCANFD-200U"
-    index: int = 0
-    channel: int = 0
-    can_type: str = "CAN"         # "CAN" | "CAN FD"
-    bitrate: int = 500000
-    data_bitrate: int = 2000000
-    terminator: bool = True
-    fd_dl: int = 64
+    channel: int = 0              # which STARTED channel (device manager) the diag/flash windows use
+    fd_dl: int = 64               # ISO-TP frame length when the channel runs CAN FD
     zlgcan_dll: str = ""          # empty -> zlgcan.dll next to the program
     sim_profile: str = "new"      # simulator only: "old" (2-byte seed, DF FE) | "new" (16-byte, 01 02)
 
