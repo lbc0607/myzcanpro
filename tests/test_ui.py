@@ -12,6 +12,7 @@ from zdiag.crc import PRESETS
 from zdiag_ui.appctx import AppContext
 from zdiag_ui.launcher import LauncherWindow
 from zdiag_ui.diag_window import DiagWindow
+from zdiag_ui.send_window import SendWindow
 from zdiag_ui.flash_window import FlashWindow, relativize
 from zdiag_ui.dialogs import CrcConfigWidget, CrcToolDialog, ServiceEditorDialog, SettingsDialog
 from zdiag_ui import qt as _qt
@@ -51,6 +52,116 @@ class Base(unittest.TestCase):
                     if it.child(j).data(0, 256)[2] == sub:
                         return it.child(j)
         raise KeyError((sid, sub))
+
+
+class SendTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.win = SendWindow(self.ctx); self.t = self.win.tabs.widget(0)
+        self.addCleanup(self.win.close)
+
+    def fill(self, id_="7e2", data="02 10 01", length="8", per="1", count="1", itv="0", name="", **kw):
+        t = self.t
+        t.e_id.setText(id_); t.e_data.setText(data); t.c_len.setCurrentText(length); t.e_per.setText(per)
+        t.e_count.setText(count); t.e_int.setText(itv); t.e_name.setText(name)
+        t.k_idinc.setChecked(kw.get("idinc", False)); t.k_datainc.setChecked(kw.get("datainc", False))
+        t.c_type.setCurrentIndex(1 if kw.get("ext") else 0); t.c_fmt.setCurrentIndex(1 if kw.get("remote") else 0)
+
+    def _log(self):
+        return self.ctx.dev.chans[0].bus._bus.log
+
+    def test_add_edit_and_columns(self):
+        t = self.t
+        self.assertEqual(t.c_ch.count(), 1); self.assertEqual(t.c_len.count(), 9)
+        self.fill(name="进入扩展会话"); t.b_add.click()
+        self.assertEqual(t.table.cell_texts(0)[2:], ["7E2", "CAN", "8", "进入扩展会话", "02 10 01 00 00 00 00 00", "标准数据帧", "1", "1", "0"])
+        c = t.table.item(0, 2); c.setText("7df"); self.assertEqual(t.items[0].can_id, 0x7DF)
+        W.QMessageBox.calls.clear(); t.table.item(0, 9).setText("0")                          # invalid -> reverted
+        self.assertTrue(msgs("warn")); self.assertEqual(t.items[0].count, 1); self.assertEqual(t.table.item(0, 9).text(), "1")
+        t.table.item(0, 6).setText("01 02 03"); self.assertEqual(t.items[0].data, bytes([1, 2, 3]))
+        self.fill(length="2", data="01 02 03"); W.QMessageBox.calls.clear(); t.b_add.click()
+        self.assertTrue(msgs("warn")); self.assertEqual(len(t.items), 1)                      # data longer than length
+
+    def test_send_now_pads_to_length_and_counts(self):
+        self.fill(count="3", itv="5", idinc=True, per="2"); self.t.b_now.click()
+        frames = [(f.can_id, f.data.hex(" ")) for f in self._log()]
+        self.assertEqual(frames, [(0x7E2 + i, "02 10 01 00 00 00 00 00") for i in range(6)])
+        self.assertEqual(self.ctx.dev.stats_of(0).snapshot()[1], 6)
+        self.assertTrue(self.t.l_time.text().startswith("发送时间(s): 0.")); self.assertEqual(self.ctx.dev.owners, {})
+
+    def test_list_send_checked_rows_modes_and_status(self):
+        t = self.t
+        self.fill(id_="100", data="AA", count="2", itv="10", length="1"); t.b_add.click()
+        self.fill(id_="200", data="BB", count="2", itv="10", length="1"); t.b_add.click()
+        self.fill(id_="300", data="CC", length="1"); t.b_add.click()
+        t.table.item(2, 0).setCheckState(0)                                                   # untick the 3rd row
+        self.assertFalse(t.items[2].checked)
+        t.c_mode.setCurrentText("串行发送模式"); t.b_list.click()
+        self.assertEqual([f.can_id for f in self._log()], [0x100, 0x100, 0x200, 0x200])
+        self.assertEqual([t.table.item(r, 1).text() for r in range(3)], ["完成", "完成", ""])
+        self._log().clear()
+        t.c_mode.setCurrentText("并行发送模式"); t.b_list.click()
+        self.assertEqual([f.can_id for f in self._log()], [0x100, 0x200, 0x100, 0x200])
+        self.assertEqual(t.b_list.text(), "列表发送"); self.assertEqual(self.ctx.dev.owners, {})
+
+    def test_select_invert_move_delete_clear_and_nothing_checked(self):
+        t = self.t
+        for i in (1, 2, 3):
+            self.fill(id_=f"{i}00"); t.b_add.click()
+        t.b_inv.click(); self.assertEqual([i.checked for i in t.items], [False] * 3)
+        W.QMessageBox.calls.clear(); t.b_list.click(); self.assertTrue(msgs("info"))           # nothing ticked
+        t.b_all.click(); self.assertEqual([i.checked for i in t.items], [True] * 3)
+        t.table.selectRow(0); t.b_down.click()
+        self.assertEqual([i.can_id for i in t.items], [0x200, 0x100, 0x300]); self.assertEqual(t.table.currentRow(), 1)
+        t.b_up.click(); t.b_up.click(); self.assertEqual(t.items[0].can_id, 0x100)       # second click: already on top
+        t.table.selectRow(0); t.b_del.click(); self.assertEqual([i.can_id for i in t.items], [0x200, 0x300])
+        t.b_clear.click(); self.assertEqual(t.items, [])
+
+    def test_row_selection_loads_form_and_import_export(self):
+        t = self.t
+        self.fill(id_="18daf110", data="01 02", length="4", ext=True, count="3", itv="20", name="x", datainc=True); t.b_add.click()
+        self.fill(id_="123", length="3", remote=True); t.b_add.click()
+        self.assertEqual(t.table.cell_texts(1)[7], "标准远程帧")
+        t.table.selectRow(0)
+        self.assertEqual((t.e_id.text(), t.c_type.currentIndex(), t.e_count.text(), t.k_datainc.isChecked()), ("18daf110", 1, "3", True))
+        path = os.path.join(self.ctx.dir, "send.json"); W.QFileDialog.next_path = path; t.b_exp.click()
+        t.b_clear.click(); W.QFileDialog.next_path = path; t.b_imp.click()
+        self.assertEqual(len(t.items), 2); self.assertTrue(t.items[1].remote); self.assertEqual(t.items[0].can_id, 0x18DAF110)
+        open(path, "w", encoding="utf-8").write("{}"); W.QMessageBox.calls.clear(); t.b_imp.click()
+        self.assertTrue(msgs("warn")); self.assertEqual(len(t.items), 2)
+
+    def test_remote_frame_is_sent_as_rtr(self):
+        self.fill(id_="123", length="3", remote=True); self.t.b_now.click()
+        f = self._log()[0]; self.assertTrue(f.rtr); self.assertEqual((f.can_id, len(f.data)), (0x123, 3))
+
+    def test_fd_channel_lengths_no_remote_and_brs(self):
+        self.ctx.dev.start_channel(1, ChannelCfg(protocol="CAN FD", data_kbps=2000), self.ctx.diag_cfg.addr)
+        t = self.t; t.c_ch.setCurrentIndex(1)
+        self.assertEqual(t.c_len.count(), 16); self.assertFalse(t.c_fmt.isEnabled())
+        self.fill(length="20", data="01"); t.b_add.click()
+        self.assertEqual(t.table.cell_texts(0)[3:5], ["CAN FD", "20"])
+        t.b_now.click()
+        f = self.ctx.dev.chans[1].bus._bus.log[0]; self.assertTrue(f.fd and f.brs); self.assertEqual(len(f.data), 20)
+        t.c_len.setCurrentText("9"); t.b_add.click(); self.assertEqual(len(t.items), 1)         # 9 is not a legal FD length
+
+    def test_no_channel_listen_only_and_busy_channel(self):
+        t = self.t
+        self.ctx.dev.stop_channel(0)
+        self.fill(); W.QMessageBox.calls.clear(); t.b_now.click()
+        self.assertIn("启动", msgs("warn")[0][2])
+        self.ctx.dev.start_channel(0, ChannelCfg(listen_only=True), self.ctx.diag_cfg.addr)
+        W.QMessageBox.calls.clear(); t.b_now.click(); self.assertIn("只听", msgs("warn")[0][2])
+        self.ctx.dev.stop_channel(0); self.ctx.dev.start_channel(0, ChannelCfg(), self.ctx.diag_cfg.addr)
+        self.ctx.dev.acquire(0, "other", self.ctx.diag_cfg.addr)
+        W.QMessageBox.calls.clear(); t.b_now.click(); self.assertIn("另一个窗口", msgs("warn")[0][2])
+        self.ctx.dev.release("other")
+
+    def test_multiple_tabs_and_close(self):
+        t2 = self.win.add_tab(); self.assertEqual(self.win.tabs.count(), 2)
+        self.ctx.dev.start_channel(1, ChannelCfg(), self.ctx.diag_cfg.addr)
+        self.assertEqual((self.t.c_ch.count(), t2.c_ch.count()), (2, 2))                      # both follow the device manager
+        self.win._close_tab(1); self.assertEqual(self.win.tabs.count(), 1)
+        self.win._close_tab(0); self.assertEqual(self.win.tabs.count(), 1)                    # the last tab stays
 
 
 class LauncherTests(Base):
@@ -132,7 +243,7 @@ class LauncherTests(Base):
 
     def test_opens_all_tools(self):
         w = LauncherWindow(self.ctx)
-        for k in ("uds", "flash", "crc"):
+        for k in ("uds", "flash", "send", "crc"):
             w._open(k)
             self.assertTrue(w.windows[k].isVisible())
         self.assertIn("zlgcan.dll", w.l_info.text())
@@ -249,10 +360,10 @@ class DiagWindowTests(Base):
         d = SettingsDialog(self.ctx, cfg, ch)
         self.assertEqual(d.e_phys.text(), "7e2"); self.assertEqual(d.a_p2.text(), "800")
         d.a_p2.setText("1234"); d.a_pad_on.setChecked(False); d.k_on.setChecked(True); d.k_period.setText("500")
-        d.s_map.setText("7e2:5,6; 7e8:2,4"); d.ch_fddl.setCurrentText("32"); d.ch_sim.setCurrentIndex(1)
+        d.a_rxpad.setText("cc"); d.s_map.setText("7e2:5,6; 7e8:2,4"); d.ch_fddl.setCurrentText("32"); d.ch_sim.setCurrentIndex(1)
         d.btn_ok.click()
         self.assertEqual((cfg.settings.p2_ms, cfg.settings.padding_enabled, cfg.keepalive.period_ms), (1234, False, 500))
-        self.assertEqual(cfg.serial_id_map["7e2"], [5, 6]); self.assertEqual((ch.fd_dl, ch.sim_profile), (32, "old"))
+        self.assertEqual((cfg.settings.rx_padding, cfg.settings.padding), (0xCC, 0x55)); self.assertEqual(cfg.serial_id_map["7e2"], [5, 6]); self.assertEqual((ch.fd_dl, ch.sim_profile), (32, "old"))
         d2 = SettingsDialog(self.ctx, cfg, ch)
         d2.a_p2.setText("abc"); d2.e_phys.setText("1fff")
         W.QMessageBox.calls.clear(); d2.btn_ok.click()

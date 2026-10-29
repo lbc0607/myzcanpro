@@ -325,6 +325,9 @@ class QTabWidget(QWidget):
     def tabText(self, i): return self._tabs[i][1]
     def setTabText(self, i, t): self._tabs[i][1] = t
     def widget(self, i): return self._tabs[i][0]
+    def removeTab(self, i):
+        del self._tabs[i]
+        self._cur = min(self._cur, len(self._tabs) - 1)
 
 
 class QStackedWidget(QWidget):

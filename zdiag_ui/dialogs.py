@@ -81,7 +81,8 @@ class SettingsDialog(W.QDialog):
         gl = W.QGridLayout(g)
         self.a_proto = W.QComboBox()
         self.a_proto.addItems(["ISO15765-2(2004)", "ISO15765-2(2016)"])
-        self.a_pad_on, self.a_pad = W.QCheckBox("填充字节(0x):"), W.QLineEdit()
+        self.a_pad_on, self.a_pad = W.QCheckBox("发送方填充字节(0x):"), W.QLineEdit()
+        self.a_rxpad = W.QLineEdit()
         self.a_p2, self.a_p2s = W.QLineEdit(), W.QLineEdit()
         self.a_stmin, self.a_bs = W.QLineEdit(), W.QLineEdit()
         self.a_ovr_on, self.a_ovr = W.QCheckBox("替换远端STmin(ms):"), W.QLineEdit()
@@ -89,6 +90,7 @@ class SettingsDialog(W.QDialog):
         self.a_supwait, self.a_anyneg = W.QCheckBox("抑制响应等待"), W.QCheckBox("判断任意消极响应")
         rows = [
             (W.QLabel("传输协议:"), self.a_proto, self.a_pad_on, self.a_pad),
+            (W.QLabel("接收方填充字节(0x):"), self.a_rxpad, W.QLabel("(ECU回复所用，仅模拟ECU生效)"), None),
             (W.QLabel("P2超时(ms):"), self.a_p2, W.QLabel("P2*超时(ms):"), self.a_p2s),
             (W.QLabel("本地STmin(ms):"), self.a_stmin, W.QLabel("BS:"), self.a_bs),
             (self.a_ovr_on, self.a_ovr, W.QLabel("下载文件重试次数:"), self.a_retry),
@@ -167,6 +169,7 @@ class SettingsDialog(W.QDialog):
         self.a_pad_on.setChecked(s.padding_enabled)
         self.a_pad.setText(f"{s.padding:02X}")
         self.a_pad.setEnabled(s.padding_enabled)
+        self.a_rxpad.setText(f"{s.rx_padding:02X}")
         self.a_p2.setText(str(s.p2_ms))
         self.a_p2s.setText(str(s.p2star_ms))
         self.a_stmin.setText(str(s.st_min_ms))
@@ -220,8 +223,9 @@ class SettingsDialog(W.QDialog):
             if ident > (0x1FFFFFFF if ext else 0x7FF):
                 raise ValueError(f"CAN ID 0x{ident:X} 超出{'扩展' if ext else '标准'}帧范围")
         k_period = int_of(self.k_period, "发送周期", 10, 600000)
-        pad = int_of(self.a_pad, "填充字节", 0, 255, 16) if self.a_pad_on.isChecked() else 0
-        vals = dict(
+        pad = int_of(self.a_pad, "发送方填充字节", 0, 255, 16)           # kept even while padding is switched off
+        rx_pad = int_of(self.a_rxpad, "接收方填充字节", 0, 255, 16)
+        vals = dict(rx_padding=rx_pad,
             p2_ms=int_of(self.a_p2, "P2超时", 1, 600000), p2star_ms=int_of(self.a_p2s, "P2*超时", 1, 600000),
             st_min_ms=int_of(self.a_stmin, "本地STmin", 0, 127), bs=int_of(self.a_bs, "BS", 0, 255),
             override_stmin_ms=int_of(self.a_ovr, "替换远端STmin", 0, 127),

@@ -50,7 +50,7 @@ def _wait_until(t: float) -> None:
 class IsoTp:
     def __init__(self, bus: Bus, tx_id: int, rx_id: int, *, extended: bool = False,
                  tx_dl: int = 8, block_size: int = 0, st_min: int = 0,
-                 padding: Optional[int] = 0xCC, n_bs: float = 1.0, n_cr: float = 1.0,
+                 padding: Optional[int] = 0x55, n_bs: float = 1.0, n_cr: float = 1.0,
                  max_wft: int = 10, rx_max: int = 1 << 20, brs: bool = True,
                  stmin_override: Optional[float] = None, auto_fc: bool = True) -> None:
         if tx_dl != 8 and tx_dl not in _FD_LENGTHS:

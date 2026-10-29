@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+build/
+dist/
+error.log
+logs/
+myzcanpro_config.json

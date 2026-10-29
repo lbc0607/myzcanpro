@@ -132,6 +132,8 @@ class ManagerTests(unittest.TestCase):
         u.request(bytes([0x10, 0x03]))
         rx, tx, err = dm.stats_of(0).snapshot()
         self.assertGreaterEqual(tx, 1); self.assertGreaterEqual(rx, 1); self.assertEqual(err, 0)
+        self.assertEqual(bus._bus.log[0].data, bytes.fromhex("02 10 03 55 55 55 55 55"))     # tester pads 0x55
+        self.assertTrue(all(f.data[-1] == 0xAA for f in bus._bus.peer.log if f.can_id in (0x7EA, 0x7E9)))                 # ECU pads 0xAA
         ecu1 = dm.sim_ecu(0)
         dm.release(me)
         a2 = Addressing(); a2.phys, a2.resp = 0x7E3, 0x7EB
@@ -139,6 +141,14 @@ class ManagerTests(unittest.TestCase):
         self.assertIsNot(dm.sim_ecu(0), ecu1)                              # rebuilt for the new IDs
         self.assertGreaterEqual(dm.stats_of(0).snapshot()[1], tx)          # counters survive the rebuild
         u = UdsClient(IsoTp(bus, 0x7E3, 0x7EB)); u.request(bytes([0x10, 0x03]))
+
+    def test_receiver_padding_is_configurable(self):
+        dm = self.dm
+        dm.open(SIM_DEVICE); dm.start_channel(0, ChannelCfg(), Addressing(), "new", 0xAA)
+        me = object()
+        bus = dm.acquire(0, me, Addressing(), "new", 0xCC)               # new padding -> simulator rebuilt
+        UdsClient(IsoTp(bus, 0x7E2, 0x7EA)).request(bytes([0x10, 0x03]))
+        self.assertTrue(any(f.can_id == 0x7EA and f.data[-1] == 0xCC for f in bus._bus.peer.log))
 
     def test_helpers(self):
         self.assertEqual([channel_count(n) for n in ("USBCANFD-400U", "USBCANFD-200U", "USBCAN-II", "USBCANFD-100U")], [4, 2, 2, 1])

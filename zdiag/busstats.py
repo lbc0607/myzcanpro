@@ -78,14 +78,15 @@ def frame_seconds(fr: CanFrame, abit: int, dbit: int = 0) -> float:
     CAN FD: estimate (stuffing in the arbitration/data phases approximated)."""
     n = len(fr.data)
     if not fr.fd:
+        rtr = 1 if fr.rtr else 0
         bits = [0]                                                   # SOF
         if fr.extended:
-            bits += _bits_of(fr.can_id >> 18 & 0x7FF, 11) + [1, 1] + _bits_of(fr.can_id & 0x3FFFF, 18) + [0]
+            bits += _bits_of(fr.can_id >> 18 & 0x7FF, 11) + [1, 1] + _bits_of(fr.can_id & 0x3FFFF, 18) + [rtr]
         else:
-            bits += _bits_of(fr.can_id & 0x7FF, 11) + [0, 0]         # RTR, IDE
+            bits += _bits_of(fr.can_id & 0x7FF, 11) + [rtr, 0]       # RTR, IDE
         bits += [0, 0] if fr.extended else [0]                       # ext: r1, r0 | std: r0
         bits += _bits_of(min(n, 8), 4)
-        for byte in fr.data[:8]:
+        for byte in (b"" if fr.rtr else fr.data[:8]):                # a remote frame carries no data field
             bits += _bits_of(byte, 8)
         bits += _bits_of(_crc15(bits), 15)
         total = _stuffed_len(bits) + 1 + 1 + 1 + 7 + 3               # CRC del, ACK, ACK del, EOF, IFS

@@ -64,7 +64,7 @@ class AppContext:
     def open_session(self, cfg, ch, owner, hooks, base_dir=None):
         """Acquire the shared bus and wrap it in a DiagSession (raises ConnError)."""
         from zdiag.engine import DiagSession
-        bus = self.dev.acquire(ch.channel, owner, cfg.addr, ch.sim_profile)
+        bus = self.dev.acquire(ch.channel, owner, cfg.addr, ch.sim_profile, cfg.settings.rx_padding)
         ccfg = self.dev.cfg_of(ch.channel)
         return DiagSession(bus, cfg, hooks, base_dir=base_dir or self.dir,
                            can_fd=bool(ccfg and ccfg.is_fd), fd_dl=ch.fd_dl)

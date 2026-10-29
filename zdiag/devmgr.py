@@ -151,7 +151,8 @@ class DeviceManager:
             self.owners.clear()
 
     # ------------------------------------------------------------ channels
-    def start_channel(self, n: int, cfg: ChannelCfg, sim_addr=None, sim_profile: str = "new") -> None:
+    def start_channel(self, n: int, cfg: ChannelCfg, sim_addr=None, sim_profile: str = "new",
+                      sim_padding: int = 0xAA) -> None:
         with self._lock:
             if not self.is_open:
                 raise ConnError("请先打开设备")
@@ -168,7 +169,7 @@ class DeviceManager:
             stats = BusStats(cfg.bitrate, cfg.data_bitrate)
             if self.name == SIM_DEVICE:
                 ch = _Chan(cfg, None, stats)
-                self._build_sim(ch, sim_addr, sim_profile)
+                self._build_sim(ch, sim_addr, sim_profile, sim_padding)
             else:
                 try:
                     bus = self.device.start_channel(n, cfg)
@@ -178,15 +179,15 @@ class DeviceManager:
             self.chans[n] = ch
         self._notify()
 
-    def _build_sim(self, ch: _Chan, addr, profile: str) -> None:
+    def _build_sim(self, ch: _Chan, addr, profile: str, padding: int = 0xAA) -> None:
         from .project import Addressing
         from .sim_ecu import make_sim
         addr = addr or Addressing()
         if ch.ecu is not None:
             ch.ecu.stop()
-        bus, ecu = make_sim(addr, profile)
+        bus, ecu = make_sim(addr, profile, padding=padding)
         ch.bus, ch.ecu = CountingBus(bus, ch.stats), ecu
-        ch.sim_key = (profile, addr.phys, addr.resp)
+        ch.sim_key = (profile, addr.phys, addr.resp, padding)
 
     def stop_channel(self, n: int) -> None:
         with self._lock:
@@ -209,15 +210,15 @@ class DeviceManager:
         self.owners.pop(n, None)
 
     # ------------------------------------------------------------ sharing the bus with the windows
-    def acquire(self, n: int, owner, addr=None, sim_profile: str = "new"):
+    def acquire(self, n: int, owner, addr=None, sim_profile: str = "new", sim_padding: int = 0xAA):
         with self._lock:
             ch = self.chans.get(n)
             if ch is None:
                 raise ConnError("通道未启动：请先在主界面打开设备并启动该通道")
             if self.owners.get(n) not in (None, owner):
                 raise ConnError(f"通道{n} 正被另一个窗口使用，请先停止它")
-            if ch.ecu is not None and addr is not None and ch.sim_key != (sim_profile, addr.phys, addr.resp):
-                self._build_sim(ch, addr, sim_profile)        # simulator follows the address/product settings
+            if ch.ecu is not None and addr is not None and ch.sim_key != (sim_profile, addr.phys, addr.resp, sim_padding):
+                self._build_sim(ch, addr, sim_profile, sim_padding)        # simulator follows the address/product settings
             if ch.cfg.listen_only:
                 raise ConnError(f"通道{n} 处于只听模式，不能发送诊断请求；请停止后以正常模式重新启动")
             self.owners[n] = owner

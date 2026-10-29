@@ -13,9 +13,9 @@ from .seedkey import xor_demo_key
 class SimEcu:
     def __init__(self, bus: Bus, req_id=0x7E0, rsp_id=0x7E8, max_block=258,
                  chatter=True, erase_pending=2, key_fn=None,
-                 serial=b"SN2024ABCD0001", seed_len=4, crc_rids=()) -> None:
+                 serial=b"SN2024ABCD0001", seed_len=4, crc_rids=(), padding=0xAA) -> None:
         # the ECU receives on req_id, transmits on rsp_id; asks tester for BS=8 / STmin=1ms
-        self.tp = IsoTp(bus, tx_id=rsp_id, rx_id=req_id, block_size=8, st_min=1)
+        self.tp = IsoTp(bus, tx_id=rsp_id, rx_id=req_id, block_size=8, st_min=1, padding=padding)
         self.bus, self.rsp_id, self.max_block = bus, rsp_id, max_block
         self.session, self.unlocked, self.seed = 1, False, b""
         self.bad_keys = 0
@@ -41,8 +41,8 @@ class SimEcu:
         # unrelated bus traffic, and a *stale* response from an earlier request
         if self.chatter:
             self.bus.send(CanFrame(0x123, bytes(8)))
-            self.bus.send(CanFrame(0x7E9, b"\x03\x62\xF1\x90"))           # other ECU
-            self.bus.send(CanFrame(self.rsp_id, b"\x03\x7F\x19\x31"))      # stale NRC of an earlier, different request
+            self.bus.send(CanFrame(0x7E9, b"\x03\x62\xF1\x90\xAA\xAA\xAA\xAA"))           # other ECU
+            self.bus.send(CanFrame(self.rsp_id, b"\x03\x7F\x19\x31\xAA\xAA\xAA\xAA"))      # stale NRC of an earlier, different request
 
     def _run(self):
         while not self._stop.is_set():

@@ -85,7 +85,8 @@ class KeepAlive:
 class Settings:
     protocol: str = "ISO15765-2(2004)"
     padding_enabled: bool = True
-    padding: int = 0x00
+    rx_padding: int = 0xAA         # receiver (ECU) padding byte: used by the built-in simulator ECU only
+    padding: int = 0x55            # tester (sender) pads with 0x55; the ECU pads its replies with 0xAA
     p2_ms: int = 2000
     p2star_ms: int = 5000
     st_min_ms: int = 0            # STmin we announce in our own FlowControl

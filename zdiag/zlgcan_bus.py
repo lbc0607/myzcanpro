@@ -282,6 +282,7 @@ class ZlgBus(Bus):
             t.transmit_type = 0
             t.frame.can_id = fr.can_id
             t.frame.eff = 1 if fr.extended else 0
+            t.frame.rtr = 1 if fr.rtr else 0
             t.frame.can_dlc = len(fr.data)
             C.memmove(t.frame.data, fr.data, len(fr.data))
             ok = L.ZCAN_Transmit(self.chn, C.byref(t), 1)

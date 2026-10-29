@@ -15,9 +15,10 @@ class CanFrame:
     fd: bool = False
     brs: bool = False
     timestamp: float = 0.0
+    rtr: bool = False           # remote frame (classic CAN only); `data` then only gives the DLC
 
     def __repr__(self) -> str:
-        return f"CanFrame(0x{self.can_id:X}, {self.data.hex(' ')}{', FD' if self.fd else ''})"
+        return f"CanFrame(0x{self.can_id:X}, {self.data.hex(' ')}{', FD' if self.fd else ''}{', RTR' if self.rtr else ''})"
 
 
 class Bus(ABC):

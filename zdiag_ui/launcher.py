@@ -45,7 +45,8 @@ class LauncherWindow(W.QMainWindow):
         v.addWidget(title)
         self._build_device_panel(v)
         self.b_uds, self.b_flash, self.b_crc = W.QPushButton("UDS诊断"), W.QPushButton("ECU刷新"), W.QPushButton("校验码计算工具")
-        for b in (self.b_uds, self.b_flash, self.b_crc):
+        self.b_send = W.QPushButton("普通发送")
+        for b in (self.b_uds, self.b_flash, self.b_send, self.b_crc):
             b.setMinimumHeight(40)
             v.addWidget(b)
         self.l_info = W.QLabel("")
@@ -53,6 +54,7 @@ class LauncherWindow(W.QMainWindow):
         v.addStretch(1)
         self.b_uds.clicked.connect(lambda: self._open("uds"))
         self.b_flash.clicked.connect(lambda: self._open("flash"))
+        self.b_send.clicked.connect(lambda: self._open("send"))
         self.b_crc.clicked.connect(lambda: self._open("crc"))
         self._status()
 
@@ -115,7 +117,8 @@ class LauncherWindow(W.QMainWindow):
             if not dlg.exec_() or dlg.result_cfg is None:
                 return
             cfg = dlg.result_cfg
-            dev.start_channel(n, cfg, self.ctx.diag_cfg.addr, self.ctx.channel.sim_profile)
+            dev.start_channel(n, cfg, self.ctx.diag_cfg.addr, self.ctx.channel.sim_profile,
+                              self.ctx.diag_cfg.settings.rx_padding)
             self.ctx.chan_cfgs[n] = cfg
             self.ctx.save()
         except ConnError as e:
@@ -179,6 +182,9 @@ class LauncherWindow(W.QMainWindow):
             if which == "uds":
                 from .diag_window import DiagWindow
                 win = DiagWindow(self.ctx)
+            elif which == "send":
+                from .send_window import SendWindow
+                win = SendWindow(self.ctx)
             elif which == "flash":
                 from .flash_window import FlashWindow
                 win = FlashWindow(self.ctx)
