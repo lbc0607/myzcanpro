@@ -13,7 +13,8 @@ from .seedkey import xor_demo_key
 class SimEcu:
     def __init__(self, bus: Bus, req_id=0x7E0, rsp_id=0x7E8, max_block=258,
                  chatter=True, erase_pending=2, key_fn=None,
-                 serial=b"SN2024ABCD0001", seed_len=4, crc_rids=(), padding=0xAA) -> None:
+                 serial=b"SN2024ABCD0001", seed_len=4, crc_rids=(), padding=0xAA, erase_rids=(),
+                 seg_crc_rids=(), file_crc_rids=()) -> None:
         # the ECU receives on req_id, transmits on rsp_id; asks tester for BS=8 / STmin=1ms
         self.tp = IsoTp(bus, tx_id=rsp_id, rx_id=req_id, block_size=8, st_min=1, padding=padding)
         self.bus, self.rsp_id, self.max_block = bus, rsp_id, max_block
@@ -28,6 +29,10 @@ class SimEcu:
         self.key_fn, self.serial = key_fn or xor_demo_key, serial
         self.seed_len, self.crc_rids = seed_len, set(crc_rids)
         self.crc_checked = []          # (rid, ok) of every CRC routine received
+        self.erase_rids, self.seg_crc_rids, self.file_crc_rids = set(erase_rids), set(seg_crc_rids), set(file_crc_rids)
+        self.erased = []               # (addr, size, ext bytes) of every erase-memory routine
+        self.file_crc = 0              # CRC32 of everything downloaded since the last erase (全文件CRC)
+        self.erase_requests = []       # raw erase PDUs, for format checks
         self.tester_present_count = 0
         self._stop = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -112,7 +117,31 @@ class SimEcu:
             rid = int.from_bytes(m[2:4], "big")
             if not self.unlocked:
                 return self._nrc(sid, 0x33)
-            if rid == 0xFF00:
+            if rid in self.erase_rids:
+                self.erase_requests.append(bytes(m))
+                if len(m) < 5:
+                    return self._nrc(sid, 0x13)
+                alfi = m[4]
+                al, sl = alfi & 0xF, alfi >> 4
+                if al == 0 or sl == 0 or len(m) not in (5 + al + sl, 6 + al + sl):
+                    return self._nrc(sid, 0x13)                      # malformed: 31 sub rid alfi addr size [ext]
+                addr = int.from_bytes(m[5:5 + al], "big")
+                size = int.from_bytes(m[5 + al:5 + al + sl], "big")
+                self.erased.append((addr, size, bytes(m[5 + al + sl:])))
+                self.file_crc = 0
+                for _ in range(self.erase_pending):
+                    self._nrc(sid, 0x78)
+                    time.sleep(0.1)
+                self._reply(b"\x71" + bytes([sub & 0x7F]) + m[2:4] + b"\x00")
+            elif rid in self.seg_crc_rids or rid in self.file_crc_rids:
+                want = self.rx_crc if rid in self.seg_crc_rids else self.file_crc
+                ok = m[4:8] == (want & 0xFFFFFFFF).to_bytes(4, "big") and len(m) == 8
+                self.crc_checked.append((rid, ok))
+                if ok:
+                    self._reply(b"\x71" + bytes([sub & 0x7F]) + m[2:4] + b"\x00")
+                else:
+                    self._nrc(sid, 0x72)
+            elif rid == 0xFF00:                                      # legacy plain erase (no parameters)
                 for _ in range(self.erase_pending):
                     self._nrc(sid, 0x78)
                     time.sleep(0.1)
@@ -147,6 +176,7 @@ class SimEcu:
             for i, b in enumerate(data):
                 self.mem[self.dl_addr + self.dl_got + i] = b
             self.rx_crc = zlib.crc32(data, self.rx_crc)
+            self.file_crc = zlib.crc32(data, self.file_crc)
             self.dl_got += len(data)
             self.expect_seq = (self.expect_seq + 1) & 0xFF
             self._reply(bytes([0x76, m[1]]))
@@ -167,7 +197,7 @@ def make_sim(addr, profile: str = "new", **kw):
          new: 16-byte seed/key, CRC routine 31 01 01 02"""
     from .bus import VirtualBus
     a, b = VirtualBus.pair()
-    prof = dict(seed_len=16, crc_rids=(0x0102,)) if profile == "new" else \
-        dict(seed_len=2, crc_rids=(0xDFFE,))
+    prof = dict(seed_len=16, erase_rids=(0xFF00,), seg_crc_rids=(0x0102,), file_crc_rids=(0x0103,)) if profile == "new" else \
+        dict(seed_len=2, erase_rids=(0xDFFF,), seg_crc_rids=(0xDFFE,), file_crc_rids=(0xDFFD,))
     prof.update(kw)
     return a, SimEcu(b, req_id=addr.phys, rsp_id=addr.resp, **prof)

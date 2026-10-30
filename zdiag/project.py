@@ -148,7 +148,10 @@ _STEP_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "unlock": {"name": "ECU解锁", "level": 1, "dll": "", "workdir": "", "use_serial": False},
     "driver": {"name": "Flash driver", "file": "", "base_addr": "0", "addr_len": 4, "size_len": 4, "dfi": "00"},
     "download": {"name": "文件下载", "file": "", "base_addr": "0", "addr_len": 4, "size_len": 4, "dfi": "00"},
-    "routine": {"name": "例程控制", "addr": "phys", "sub": "01", "rid": "", "data": "",
+    # rkind: "custom"/"query" = generic 31 request (placeholders {addr} {len} {crc}); "erase" = 擦除内存;
+    #        "crc" = CRC校验 (crc_mode "region" = 分段CRC + 全文件CRC, "file" = 只做全文件CRC)
+    "routine": {"name": "例程控制", "rkind": "custom", "addr": "phys", "sub": "01", "rid": "", "data": "",
+                "rid_file": "", "crc_mode": "region", "erase_range": "sum", "ext_on": True, "ext": "01",
                 "use_crc": False, "crc": CrcSpec().to_dict(), "crc_order": "big",
                 "source": "", "per_region": True, "addr_len": 4, "size_len": 4,
                 "expect": "", "status_ok": ""},
@@ -183,6 +186,17 @@ def step_summary(s: dict) -> str:
     if t in ("driver", "download"):
         import os
         return f"文件名:{os.path.basename(s['file']) if s['file'] else ''}"
+    if t == "routine" and s.get("rkind") == "erase":
+        txt = f"31 {s['sub'].strip().upper()} {fmt_hex(parse_hex(s['rid'])) if s['rid'].strip() else ''}".strip()
+        return f"{txt} {(int(s['size_len']) << 4 | int(s['addr_len'])):02X} [起始地址][大小]" + \
+               (f" {s['ext'].strip().upper()}" if s.get("ext_on", True) else "")
+    if t == "routine" and s.get("rkind") == "crc":
+        sub = s["sub"].strip().upper()
+        r1 = fmt_hex(parse_hex(s["rid"])) if s["rid"].strip() else ""
+        r2 = fmt_hex(parse_hex(s["rid_file"])) if s.get("rid_file", "").strip() else r1
+        mode = f"分段 31 {sub} {r1} + 全文件 31 {sub} {r2}" if s.get("crc_mode", "region") == "region" \
+            else f"全文件 31 {sub} {r2}"
+        return f"{mode} [{s['crc'].get('name', 'CRC')}]"
     if t == "routine":
         txt = f"31 {s['sub'].strip().upper()} {fmt_hex(parse_hex(s['rid'])) if s['rid'].strip() else ''}".strip()
         if s.get("data", "").strip():
@@ -225,7 +239,7 @@ class Project:
 
 def sample_project(product: str = "new") -> Project:
     """Mirrors the sample plan in the ZCANPro screenshot.  product: 'new' | 'old'."""
-    rid = "01 02" if product == "new" else "DF FE"
+    ids = {"new": ("FF 00", "01 02", "01 03"), "old": ("DF FF", "DF FE", "DF FD")}[product]
     p = Project(name=f"sample-{product}")
     p.steps = [
         new_step("service", name="进入扩展模式", pdu="10 03"),
@@ -234,9 +248,10 @@ def sample_project(product: str = "new") -> Project:
         new_step("service", name="进入编程模式", pdu="10 02"),
         new_step("unlock", level=1, dll="sa_demo.dll"),
         new_step("driver"),
+        new_step("routine", name="擦除内存", rkind="erase", sub="01", rid=ids[0]),
         new_step("download"),
-        new_step("routine", name="CRC校验", sub="01", rid=rid, use_crc=True,
-                 crc=PRESETS["CRC32"].to_dict()),
+        new_step("routine", name="CRC校验", rkind="crc", sub="01", rid=ids[1], rid_file=ids[2],
+                 crc_mode="region", crc=PRESETS["CRC32"].to_dict()),
         new_step("service", name="ECU复位", pdu="11 01"),
     ]
     return p

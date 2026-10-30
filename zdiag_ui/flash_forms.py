@@ -236,80 +236,186 @@ class DownloadForm(StepForm):
 
 # --------------------------------------------------------------------------- 31 例程控制 (+CRC)
 class RoutineForm(StepForm):
+    """31 例程控制.  例程类型: 擦除内存 / CRC校验 / 更新条件查询 / 自定义例程.
+    Every identifier (2 bytes) and the sub-function are entered by the user - they differ per function and ECU."""
     kind = "routine"
+    KINDS = [("擦除内存", "erase"), ("CRC校验", "crc"), ("更新条件查询", "query"), ("自定义例程", "custom")]
+    FIRMWARE = "固件 (*.hex *.s19 *.srec *.bin *.mot);;所有文件 (*.*)"
 
     def __init__(self, ctx, svc, parent=None) -> None:
         super().__init__(ctx, svc, parent)
-        self.e_desc.setText("CRC校验")
+        self._last_default = "CRC校验"
+        self.e_desc.setText(self._last_default)
         g = W.QGridLayout()
         self.c_addr = W.QComboBox()
         self.c_addr.addItems(["物理地址", "功能地址"])
+        self.c_kind = W.QComboBox()
+        for text, key in self.KINDS:
+            self.c_kind.addItem(text, key)
         self.c_sub = W.QComboBox()
         self.c_sub.setEditable(True)
-        for s in svc["subs"]:
-            self.c_sub.addItem(f"{s['code']:02X} {s['name']}")
-        self.e_rid, self.e_data = W.QLineEdit(), W.QLineEdit()
+        for sub in svc["subs"]:
+            self.c_sub.addItem(f"{sub['code']:02X} {sub['name']}")
+        self.e_rid, self.e_rid_file = W.QLineEdit(), W.QLineEdit()
         self.e_exp, self.e_status = W.QLineEdit(), W.QLineEdit()
+        self.l_rid, self.l_rid_file = W.QLabel("例程标识符(0x):"), W.QLabel("全文件CRC标识符(0x):")
         _row(g, 0, "请求地址:", self.c_addr)
-        _row(g, 1, "子服务:", self.c_sub)
-        _row(g, 2, "例程标识符(0x):", self.e_rid)
-        _row(g, 3, "附加数据(0x):", self.e_data)
-        _row(g, 4, "期望响应(0x):", self.e_exp)
-        _row(g, 5, "例程状态应为(0x):", self.e_status)
-        g.addWidget(W.QLabel("附加数据可含占位符 {addr} {len} {crc}，如  {addr} {len}"), 6, 0, 1, 3)
+        _row(g, 1, "例程类型:", self.c_kind)
+        _row(g, 2, "子服务:", self.c_sub)
+        g.addWidget(self.l_rid, 3, 0)
+        g.addWidget(self.e_rid, 3, 1)
+        g.addWidget(self.l_rid_file, 4, 0)
+        g.addWidget(self.e_rid_file, 4, 1)
+        _row(g, 5, "期望响应(0x):", self.e_exp)
+        _row(g, 6, "例程状态应为(0x):", self.e_status)
+        g.addWidget(W.QLabel("标识符为 2 字节，随功能和 ECU 而不同，请按需求文档填写。"), 7, 0, 1, 3)
         self.v.addLayout(g)
-        gc = W.QGroupBox("CRC")
-        cl = W.QVBoxLayout(gc)
-        self.k_crc = W.QCheckBox("自动计算 CRC 并追加到 PDU 末尾")
-        cl.addWidget(self.k_crc)
+
+        # ---- 擦除内存:  31 sub RID  alfi  [起始地址]  [大小]  [扩展字节]
+        self.g_erase = W.QGroupBox("擦除内存")
+        ge = W.QGridLayout(self.g_erase)
+        self.k_ext, self.e_ext = W.QCheckBox("附加擦除内存扩展字节(0x):"), W.QLineEdit("01")
+        self.k_ext.setChecked(True)
+        self.c_range = W.QComboBox()
+        self.c_range.addItem("各段长度之和(与校验码工具的总长度一致)", "sum")
+        self.c_range.addItem("首段起始到末段末尾的跨度", "span")
+        self.e_al, self.e_sl = W.QLineEdit("4"), W.QLineEdit("4")
+        self.l_alfi = W.QLabel("")
+        self.e_src_e, self.b_src_e = W.QLineEdit(), W.QPushButton("浏览")
+        ge.addWidget(self.k_ext, 0, 0)
+        ge.addWidget(self.e_ext, 0, 1)
+        _row(ge, 1, "擦除大小取值:", self.c_range)
+        _row(ge, 2, "地址长度(字节):", self.e_al)
+        _row(ge, 3, "大小长度(字节):", self.e_sl)
+        ge.addWidget(self.l_alfi, 4, 0, 1, 3)
+        _row(ge, 5, "数据来源文件:", self.e_src_e, self.b_src_e)
+        ge.addWidget(W.QLabel("起始地址、大小取自烧写文件(留空 = 方案里的「文件下载」文件)，整个流程只擦除一次。"), 6, 0, 1, 3)
+        self.v.addWidget(self.g_erase)
+
+        # ---- CRC校验:  31 sub RID [CRC]
+        self.g_crc = W.QGroupBox("CRC校验")
+        gc = W.QVBoxLayout(self.g_crc)
+        self.c_mode = W.QComboBox()
+        self.c_mode.addItem("分段CRC(每段传输结束后校验，最后再做全文件CRC)", "region")
+        self.c_mode.addItem("全文件CRC(仅烧录结束后校验一次)", "file")
+        gc.addWidget(self.c_mode)
         self.crc = CrcConfigWidget()
-        cl.addWidget(self.crc)
-        g2 = W.QGridLayout()
+        gc.addWidget(self.crc)
+        gc2 = W.QGridLayout()
         self.c_order = W.QComboBox()
         self.c_order.addItems(["大端(高字节在前)", "小端(低字节在前)"])
+        self.e_src_c, self.b_src_c = W.QLineEdit(), W.QPushButton("浏览")
+        _row(gc2, 0, "CRC字节序:", self.c_order)
+        _row(gc2, 1, "数据来源文件:", self.e_src_c, self.b_src_c)
+        gc2.addWidget(W.QLabel("PDU: 31 [子服务] [标识符] [校验码]；全文件CRC 为整个烧写文件(各段按顺序拼接)的校验值。"), 2, 0, 1, 3)
+        gc.addLayout(gc2)
+        self.v.addWidget(self.g_crc)
+
+        # ---- 更新条件查询 / 自定义例程: free parameters
+        self.g_custom = W.QGroupBox("附加数据")
+        gu = W.QGridLayout(self.g_custom)
+        self.e_data = W.QLineEdit()
+        gu.addWidget(W.QLabel("附加数据(0x):"), 0, 0)
+        gu.addWidget(self.e_data, 0, 1)
+        gu.addWidget(W.QLabel("附加数据可含占位符 {addr} {len} {crc}，如  {addr} {len}"), 1, 0, 1, 3)
+        self.k_crc = W.QCheckBox("自动计算 CRC 并追加到 PDU 末尾")
+        gu.addWidget(self.k_crc, 2, 0, 1, 3)
+        self.lcrc = CrcConfigWidget()
+        gu.addWidget(self.lcrc, 3, 0, 1, 3)
+        self.c_lorder = W.QComboBox()
+        self.c_lorder.addItems(["大端(高字节在前)", "小端(低字节在前)"])
         self.e_src, self.b_src = W.QLineEdit(), W.QPushButton("浏览")
         self.k_reg = W.QCheckBox("按区域分别发送(每个区域一条请求)")
         self.k_reg.setChecked(True)
-        self.e_al, self.e_sl = W.QLineEdit("4"), W.QLineEdit("4")
-        _row(g2, 0, "CRC字节序:", self.c_order)
-        _row(g2, 1, "数据来源文件:", self.e_src, self.b_src)
-        g2.addWidget(self.k_reg, 2, 0, 1, 3)
-        _row(g2, 3, "地址长度(字节):", self.e_al)
-        _row(g2, 4, "数据长度(字节):", self.e_sl)
-        g2.addWidget(W.QLabel("数据来源留空 = 最近一次「文件下载」步骤的文件。"), 5, 0, 1, 3)
-        cl.addLayout(g2)
-        self.v.addWidget(gc)
+        self.e_lal, self.e_lsl = W.QLineEdit("4"), W.QLineEdit("4")
+        _row(gu, 4, "CRC字节序:", self.c_lorder)
+        _row(gu, 5, "数据来源文件:", self.e_src, self.b_src)
+        gu.addWidget(self.k_reg, 6, 0, 1, 3)
+        _row(gu, 7, "地址长度(字节):", self.e_lal)
+        _row(gu, 8, "数据长度(字节):", self.e_lsl)
+        self.v.addWidget(self.g_custom)
         self.v.addStretch(1)
         self.c_sub.setCurrentIndex(0)
-        self.b_src.clicked.connect(lambda: self._browse(
-            self.e_src, "选择数据来源文件", "固件 (*.hex *.s19 *.srec *.bin *.mot);;所有文件 (*.*)"))
+        self.c_kind.setCurrentIndex(1)
+        for b, e in ((self.b_src_e, self.e_src_e), (self.b_src_c, self.e_src_c), (self.b_src, self.e_src)):
+            b.clicked.connect(lambda _=False, e=e: self._browse(e, "选择数据来源文件", self.FIRMWARE))
+        self.c_kind.currentIndexChanged.connect(self._on_kind)
+        self.e_al.textChanged.connect(self._alfi)
+        self.e_sl.textChanged.connect(self._alfi)
+        self._on_kind()
+        self._alfi()
 
+    # -- dynamic bits
+    def kind_key(self) -> str:
+        return self.c_kind.currentData() or "custom"
+
+    def _on_kind(self, *_) -> None:
+        k = self.kind_key()
+        self.g_erase.setVisible(k == "erase")
+        self.g_crc.setVisible(k == "crc")
+        self.g_custom.setVisible(k in ("query", "custom"))
+        self.l_rid.setText("分段CRC标识符(0x):" if k == "crc" else "例程标识符(0x):")
+        self.l_rid_file.setVisible(k == "crc")
+        self.e_rid_file.setVisible(k == "crc")
+        if self.e_desc.text().strip() in ("", self._last_default):          # keep user-written descriptions
+            self._last_default = {"erase": "擦除内存", "crc": "CRC校验", "query": "更新条件查询",
+                                  "custom": "例程控制"}[k]
+            self.e_desc.setText(self._last_default)
+
+    def _alfi(self, *_) -> None:
+        try:
+            al, sl = int(self.e_al.text()), int(self.e_sl.text())
+            self.l_alfi.setText(f"地址和长度格式标识符: 0x{(sl << 4) | al:02X}  (高4位=大小长度，低4位=地址长度)")
+        except ValueError:
+            self.l_alfi.setText("地址和长度格式标识符: -")
+
+    # -- widgets -> step
     def to_step(self) -> dict:
         t = self.c_sub.currentText().strip()
         sub = parse_hex(t.split()[0]) if t else b""
         if len(sub) != 1:
             raise ValueError("子服务必须是 1 字节")
+        k = self.kind_key()
         rid = parse_hex(self.e_rid.text())
         if len(rid) != 2:
-            raise ValueError("例程标识符必须是 2 字节，如 DF FE")
+            raise ValueError(f"{'分段CRC' if k == 'crc' else '例程'}标识符必须是 2 字节，如 DF FE")
+        for txt in (self.e_exp.text(), self.e_status.text()):
+            if txt.strip():
+                parse_hex(txt.replace("xx", "00").replace("XX", "00"))
+        common = dict(name=self.desc(), rkind=k, addr="func" if self.c_addr.currentIndex() else "phys",
+                      sub=fmt_hex(sub), rid=fmt_hex(rid), expect=self.e_exp.text().strip(),
+                      status_ok=self.e_status.text().strip())
+        if k == "erase":
+            ext = parse_hex(self.e_ext.text())
+            if self.k_ext.isChecked() and len(ext) != 1:
+                raise ValueError("擦除内存扩展字节必须是 1 字节，如 01")
+            return new_step("routine", **common, ext_on=self.k_ext.isChecked(), ext=fmt_hex(ext) or "01",
+                            erase_range=self.c_range.currentData() or "sum",
+                            addr_len=int_of(self.e_al, "地址长度", 1, 8), size_len=int_of(self.e_sl, "大小长度", 1, 8),
+                            source=self.e_src_e.text().strip())
+        if k == "crc":
+            rf = parse_hex(self.e_rid_file.text()) if self.e_rid_file.text().strip() else b""
+            if rf and len(rf) != 2:
+                raise ValueError("全文件CRC标识符必须是 2 字节(留空则与分段CRC标识符相同)")
+            return new_step("routine", **common, rid_file=fmt_hex(rf), crc_mode=self.c_mode.currentData() or "region",
+                            crc=self.crc.spec().to_dict(), crc_order="little" if self.c_order.currentIndex() else "big",
+                            source=self.e_src_c.text().strip())
         data = self.e_data.text().strip()
         from zdiag.engine import render_template, StepError
         try:
             render_template(data, {"addr": b"", "len": b"", "crc": b""})
         except StepError as e:
             raise ValueError(str(e))
-        for txt in (self.e_exp.text(), self.e_status.text()):
-            if txt.strip():
-                parse_hex(txt.replace("xx", "00").replace("XX", "00"))
-        spec = self.crc.spec() if self.k_crc.isChecked() else CrcSpec()
-        return new_step("routine", name=self.desc(), addr="func" if self.c_addr.currentIndex() else "phys",
-                        sub=fmt_hex(sub), rid=fmt_hex(rid), data=data, use_crc=self.k_crc.isChecked(),
-                        crc=spec.to_dict(), crc_order="little" if self.c_order.currentIndex() else "big",
+        spec = self.lcrc.spec() if self.k_crc.isChecked() else CrcSpec()
+        return new_step("routine", **common, data=data, use_crc=self.k_crc.isChecked(), crc=spec.to_dict(),
+                        crc_order="little" if self.c_lorder.currentIndex() else "big",
                         source=self.e_src.text().strip(), per_region=self.k_reg.isChecked(),
-                        addr_len=int_of(self.e_al, "地址长度", 1, 8), size_len=int_of(self.e_sl, "数据长度", 1, 8),
-                        expect=self.e_exp.text().strip(), status_ok=self.e_status.text().strip())
+                        addr_len=int_of(self.e_lal, "地址长度", 1, 8), size_len=int_of(self.e_lsl, "数据长度", 1, 8))
 
+    # -- step -> widgets
     def load_step(self, s: dict) -> None:
+        k = s.get("rkind", "custom")
+        self.c_kind.setCurrentIndex(max(0, self.c_kind.findData(k)))
         self.e_desc.setText(s.get("name", ""))
         self.c_addr.setCurrentIndex(1 if s.get("addr") == "func" else 0)
         code = parse_hex(s.get("sub", "01"))[0]
@@ -320,16 +426,32 @@ class RoutineForm(StepForm):
         else:
             self.c_sub.setCurrentText(f"{code:02X}")
         self.e_rid.setText(s.get("rid", ""))
-        self.e_data.setText(s.get("data", ""))
         self.e_exp.setText(s.get("expect", ""))
         self.e_status.setText(s.get("status_ok", ""))
+        self.e_rid_file.setText(s.get("rid_file", ""))
+        self.k_ext.setChecked(bool(s.get("ext_on", True)))
+        self.e_ext.setText(s.get("ext", "01"))
+        self.c_range.setCurrentIndex(1 if s.get("erase_range") == "span" else 0)
+        self.c_mode.setCurrentIndex(1 if s.get("crc_mode") == "file" else 0)
+        order = 1 if s.get("crc_order") == "little" else 0
+        al, sl = str(s.get("addr_len", 4)), str(s.get("size_len", 4))
+        self.e_al.setText(al)
+        self.e_sl.setText(sl)
+        self.e_lal.setText(al)
+        self.e_lsl.setText(sl)
+        spec = CrcSpec.from_dict(s.get("crc", {}))
+        self.crc.set_spec(spec)
+        self.lcrc.set_spec(spec)
+        self.c_order.setCurrentIndex(order)
+        self.c_lorder.setCurrentIndex(order)
+        src = s.get("source", "")
+        self.e_src_e.setText(src)
+        self.e_src_c.setText(src)
+        self.e_src.setText(src)
+        self.e_data.setText(s.get("data", ""))
         self.k_crc.setChecked(bool(s.get("use_crc")))
-        self.crc.set_spec(CrcSpec.from_dict(s.get("crc", {})))
-        self.c_order.setCurrentIndex(1 if s.get("crc_order") == "little" else 0)
-        self.e_src.setText(s.get("source", ""))
         self.k_reg.setChecked(bool(s.get("per_region", True)))
-        self.e_al.setText(str(s.get("addr_len", 4)))
-        self.e_sl.setText(str(s.get("size_len", 4)))
+        self._last_default = self.e_desc.text()
 
 
 def make_form(ctx, svc: Dict) -> StepForm:

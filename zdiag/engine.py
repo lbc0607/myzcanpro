@@ -172,6 +172,9 @@ class DiagSession:
         self.verbose_transfer = False
         self.search_dirs: List[str] = [base_dir]      # where relative file / DLL paths are looked up
         self.last_download: Optional[Tuple[str, List[Segment]]] = None
+        self._plan: Optional[List[dict]] = None       # the plan being run (None for a single run_step)
+        self._idx = -1
+        self._seg_done: set = set()                   # indexes of CRC steps whose per-segment checks already ran
 
     # -- logging
     def log(self, kind: str, text: str, can_id=None, direction: str = "", data: bytes = b"") -> None:
@@ -295,7 +298,7 @@ class DiagSession:
         fresh = self.uds.security_access(self._key_fn(s), level)
         return "已解锁" if fresh else "已处于解锁状态(seed 全 0)"
 
-    def _download(self, s: dict) -> str:
+    def _download(self, s: dict, after_segment=None) -> str:
         st = self.cfg.settings
         segs = segments_for(self.resolve(s["file"]), s.get("base_addr", "0"))
         al, sl, dfi = int(s["addr_len"]), int(s["size_len"]), parse_hex(s.get("dfi", "00"))[0]
@@ -325,18 +328,124 @@ class DiagSession:
                 if st.block_interval_ms:
                     self.sleep(st.block_interval_ms / 1000.0)
             self.uds.request_transfer_exit()
+            if after_segment is not None:
+                after_segment(seg)
         return f"{len(segs)} 个区域, {total} 字节"
 
     def _step_driver(self, s: dict) -> str:
         return self._download(s)
 
     def _step_download(self, s: dict) -> str:
-        res = self._download(s)
         path = self.resolve(s["file"])
-        self.last_download = (path, segments_for(path, s.get("base_addr", "0")))
-        return res
+        segs = segments_for(path, s.get("base_addr", "0"))
+        self.last_download = (path, segs)
+        attached = self._attached_crc_steps()
+        notes: List[str] = []
+
+        def verify(seg: Segment) -> None:                  # 分段CRC: right after this segment's 0x37
+            for j, cs in attached:
+                crc = self._send_crc(cs, cs["rid"], seg.data, f"分段CRC 0x{seg.addr:X}")
+                notes.append(f"0x{seg.addr:X}:{crc.hex().upper()}")
+                self._seg_done.add(j)
+
+        res = self._download(s, verify if attached else None)
+        return res + (f"; 分段CRC {', '.join(notes)}" if notes else "")
+
+    # ------------------------------------------------------------------ 31 routine control
+    def _attached_crc_steps(self) -> List[Tuple[int, dict]]:
+        """CRC steps (分段 mode) that belong to the download step now running: those after it in the plan,
+        before the next download step, using the downloaded file (no separate source)."""
+        if self._plan is None:
+            return []
+        out = []
+        for j in range(self._idx + 1, len(self._plan)):
+            st = self._plan[j]
+            if st.get("type") == "download":
+                break
+            if (st.get("type") == "routine" and st.get("rkind") == "crc" and st.get("crc_mode", "region") == "region"
+                    and not st.get("source", "").strip()):
+                out.append((j, st))
+        return out
+
+    def _file_segments(self, s: dict) -> List[Segment]:
+        """Image the routine works on: its own source file, else the last 文件下载, else the first one in the plan
+        (the erase step runs BEFORE the download)."""
+        src = s.get("source", "").strip()
+        if src:
+            return segments_for(self.resolve(src))
+        if self.last_download:
+            return self.last_download[1]
+        for st in (self._plan or []):
+            if st.get("type") == "download":
+                return segments_for(self.resolve(st["file"]), st.get("base_addr", "0"))
+        raise StepError("找不到烧写文件：请在例程里指定「数据来源文件」，或在方案里加入「文件下载」步骤")
+
+    def _routine_pdu(self, s: dict, rid_text: str, body: bytes) -> Tuple[bytes, bytes, int]:
+        sub = parse_hex(s["sub"])[0]
+        rid = parse_hex(rid_text)
+        if len(rid) != 2:
+            raise StepError("例程标识符必须是 2 字节，如 DF FE")
+        return bytes([0x31, sub]) + rid + body, rid, sub
+
+    def _check_routine(self, s: dict, pdu: bytes, rid: bytes, sub: int, what: str) -> None:
+        r = self.exchange(pdu, s.get("addr", "phys"), False)
+        exp = s.get("expect", "").strip() or f"71 {sub:02X} {fmt_hex(rid)}"
+        ok, why = match_expect(exp, r, self.cfg.settings.any_negative)
+        if ok and s.get("status_ok", "").strip() and r.data:
+            want = parse_hex(s["status_ok"])
+            if r.data[4:4 + len(want)] != want:
+                ok, why = False, f"例程状态 {fmt_hex(r.data[4:])}，期望 {fmt_hex(want)}"
+        if not ok:
+            raise StepError(f"{what}失败: {why}")
+
+    def _send_crc(self, s: dict, rid_text: str, data: bytes, what: str) -> bytes:
+        """31 [sub] [RID] [CRC]  — the CRC of `data` only (no address / length)."""
+        crc = crc_bytes(CrcSpec.from_dict(s.get("crc", {})), data, s.get("crc_order", "big"))
+        pdu, rid, sub = self._routine_pdu(s, rid_text, crc)
+        self.check_cancel()
+        self._check_routine(s, pdu, rid, sub, what)
+        return crc
+
+    def _routine_crc(self, s: dict) -> str:
+        segs = self._file_segments(s)
+        done: List[str] = []
+        if s.get("crc_mode", "region") == "region" and self._idx not in self._seg_done:
+            for seg in segs:                                # not interleaved with the download -> do it now
+                crc = self._send_crc(s, s["rid"], seg.data, f"分段CRC 0x{seg.addr:X}")
+                done.append(f"0x{seg.addr:X}:{crc.hex().upper()}")
+        whole = b"".join(g.data for g in segs)
+        crc = self._send_crc(s, s.get("rid_file", "") or s["rid"], whole, "全文件CRC")
+        done.append(f"全文件:{crc.hex().upper()}")
+        return "CRC " + ", ".join(done) if done else ""
+
+    def _routine_erase(self, s: dict) -> str:
+        segs = self._file_segments(s)
+        al, sl = int(s["addr_len"]), int(s["size_len"])
+        start = min(g.addr for g in segs)
+        end = max(g.addr + len(g.data) for g in segs)
+        total = sum(len(g.data) for g in segs)
+        size = end - start if s.get("erase_range") == "span" else total
+        if end - start != total:
+            self.log("INFO", f"注意: 烧写文件地址不连续(首尾跨度 {end - start} 字节，各段之和 {total} 字节)，"
+                             f"擦除大小按「{'首段起始到末段末尾' if size != total else '各段长度之和'}」= {size} 字节")
+        if start >= 1 << (8 * al) or size >= 1 << (8 * sl):
+            raise StepError(f"起始地址 0x{start:X} 或大小 {size} 超出{al}/{sl}字节的表示范围")
+        body = bytes([(sl << 4) | al]) + start.to_bytes(al, "big") + size.to_bytes(sl, "big")
+        if s.get("ext_on", True):
+            ext = parse_hex(s.get("ext", "01"))
+            if len(ext) != 1:
+                raise StepError("擦除内存扩展字节必须是 1 字节")
+            body += ext
+        pdu, rid, sub = self._routine_pdu(s, s["rid"], body)
+        self._check_routine(s, pdu, rid, sub, "擦除内存")
+        return f"擦除 0x{start:X} 大小 {size}"
 
     def _step_routine(self, s: dict) -> str:
+        kind = s.get("rkind", "custom")
+        if kind == "erase":
+            return self._routine_erase(s)
+        if kind == "crc":
+            return self._routine_crc(s)
         sub = parse_hex(s["sub"])[0]
         rid = parse_hex(s["rid"])
         if len(rid) != 2:
@@ -397,7 +506,9 @@ class DiagSession:
                 if repeat > 1:
                     self.log("INFO", f"===== 第 {n + 1}/{repeat} 次刷写 =====")
                 self.last_download = None
+                self._plan, self._seg_done = steps, set()
                 for i, step in enumerate(steps):
+                    self._idx = i
                     self.check_cancel()
                     self.hooks.step(i, "running", "")
                     self.hooks.progress(0, 0)
@@ -420,6 +531,7 @@ class DiagSession:
             self.log("INFO", "已取消")
             return False
         finally:
+            self._plan, self._idx = None, -1
             self.uds.stop_keepalive()
 
 
@@ -456,6 +568,18 @@ def preflight(steps: List[dict], base_dir: str = ".") -> List[str]:
                 else:
                     segments_for(_abs(base_dir, f), s.get("base_addr", "0"))
                     seen_download = seen_download or t == "download"
+            elif t == "routine" and s.get("rkind") in ("erase", "crc"):
+                if len(parse_hex(s.get("rid", ""))) != 2:
+                    out.append(f"{tag}: {'分段CRC' if s['rkind'] == 'crc' else '例程'}标识符必须是 2 字节")
+                if s["rkind"] == "crc" and s.get("rid_file", "").strip() and len(parse_hex(s["rid_file"])) != 2:
+                    out.append(f"{tag}: 全文件CRC标识符必须是 2 字节")
+                if s["rkind"] == "erase" and s.get("ext_on", True) and len(parse_hex(s.get("ext", "01"))) != 1:
+                    out.append(f"{tag}: 擦除内存扩展字节必须是 1 字节")
+                src = s.get("source", "").strip()
+                if src:
+                    segments_for(_abs(base_dir, src))
+                elif not any(x.get("type") == "download" for x in steps):
+                    out.append(f"{tag}: 需要烧写文件，但方案里没有「文件下载」步骤，也未指定数据来源文件")
             elif t == "routine":
                 if len(parse_hex(s.get("rid", ""))) != 2:
                     out.append(f"{tag}: 例程标识符必须是 2 字节")

@@ -423,9 +423,11 @@ class FlashTests(Base):
 
     def test_editor_shows_sample_like_screenshot(self):
         e = self.w.editor
-        self.assertEqual(e.table.rowCount(), 9)
-        self.assertEqual([e.table.item(r, 0).text() for r in (0, 1, 4, 8)], ["进入扩展模式", "关闭DTC设置", "ECU解锁", "ECU复位"])
-        self.assertEqual(e.table.item(7, 1).text(), "31 01 01 02 [CRC32]")
+        self.assertEqual(e.table.rowCount(), 10)
+        self.assertEqual([e.table.item(r, 0).text() for r in (0, 1, 4, 6, 8, 9)],
+                         ["进入扩展模式", "关闭DTC设置", "ECU解锁", "擦除内存", "CRC校验", "ECU复位"])
+        self.assertEqual(e.table.item(6, 1).text(), "31 01 FF 00 44 [起始地址][大小] 01")
+        self.assertEqual(e.table.item(8, 1).text(), "分段 31 01 01 02 + 全文件 31 01 01 03 [CRC32]")
         self.assertIn("编辑器 - sample-new", self.w.tabs.tabText(0))
 
     def test_select_row_loads_forms_and_update_changes_params(self):
@@ -436,12 +438,31 @@ class FlashTests(Base):
         form.e_level.setText("3"); e.b_upd.click()
         self.assertEqual(self.w.project.steps[4]["level"], 3)
         self.assertEqual(e.table.item(4, 1).text(), "级别:3 DLL:sa_demo.dll")
-        e.table.selectRow(7)                                     # routine -> change RID + CRC type
-        f = e._current_form(); self.assertEqual(f.kind, "routine"); self.assertEqual(f.e_rid.text(), "01 02")
-        f.e_rid.setText("DF FE"); f.crc.combo.setCurrentText("CRC16/XMODEM"); e.b_upd.click()
-        st = self.w.project.steps[7]
-        self.assertEqual((st["rid"], st["crc"]["width"], st["crc"]["name"]), ("DF FE", 16, "CRC16/XMODEM"))
-        self.assertEqual(e.table.item(7, 1).text(), "31 01 DF FE [CRC16/XMODEM]")
+        e.table.selectRow(8)                                     # CRC routine -> change RIDs, mode and CRC type
+        f = e._current_form(); self.assertEqual((f.kind, f.kind_key()), ("routine", "crc"))
+        self.assertEqual((f.e_rid.text(), f.e_rid_file.text(), f.c_mode.currentData()), ("01 02", "01 03", "region"))
+        self.assertTrue(f.g_crc.isVisible() and not f.g_erase.isVisible() and not f.g_custom.isVisible())
+        f.e_rid.setText("DF FE"); f.e_rid_file.setText("DF FD"); f.c_mode.setCurrentIndex(1)
+        f.crc.combo.setCurrentText("CRC16/XMODEM"); f.c_order.setCurrentIndex(1); e.b_upd.click()
+        st = self.w.project.steps[8]
+        self.assertEqual((st["rid"], st["rid_file"], st["crc_mode"], st["crc_order"], st["crc"]["width"], st["crc"]["name"]),
+                         ("DF FE", "DF FD", "file", "little", 16, "CRC16/XMODEM"))
+        self.assertEqual(e.table.item(8, 1).text(), "全文件 31 01 DF FD [CRC16/XMODEM]")
+        e.table.selectRow(6)                                     # erase routine -> every parameter is editable
+        f = e._current_form(); self.assertEqual(f.kind_key(), "erase"); self.assertTrue(f.g_erase.isVisible() and not f.g_crc.isVisible())
+        self.assertEqual((f.e_rid.text(), f.e_ext.text(), f.k_ext.isChecked(), f.c_range.currentData()), ("FF 00", "01", True, "sum"))
+        self.assertIn("0x44", f.l_alfi.text())
+        f.e_rid.setText("DF FF"); f.e_ext.setText("A5"); f.c_range.setCurrentIndex(1); f.e_sl.setText("2")
+        self.assertIn("0x24", f.l_alfi.text()); e.b_upd.click()
+        st = self.w.project.steps[6]
+        self.assertEqual((st["rkind"], st["rid"], st["ext"], st["ext_on"], st["erase_range"], st["size_len"]), ("erase", "DF FF", "A5", True, "span", 2))
+        f.k_ext.setChecked(False); e.b_upd.click(); self.assertFalse(self.w.project.steps[6]["ext_on"])
+        self.assertEqual(e.table.item(6, 1).text(), "31 01 DF FF 24 [起始地址][大小]")
+        f.c_kind.setCurrentIndex(2)                              # 更新条件查询: plain 31 request
+        self.assertTrue(f.g_custom.isVisible() and f.e_desc.text() == "更新条件查询")
+        f.e_rid.setText("02 03"); f.e_data.setText("01"); e.b_upd.click()
+        st = self.w.project.steps[6]; self.assertEqual((st["rkind"], st["rid"], st["data"]), ("query", "02 03", "01"))
+        self.assertEqual(e.table.item(6, 1).text(), "31 01 02 03 01")
         e.table.selectRow(0)
         g = e._current_form(); self.assertEqual(g.kind, "service"); self.assertEqual(g.e_data.text(), "")
         g.e_data.setText("")                                     # 10 + sub 03
@@ -467,9 +488,13 @@ class FlashTests(Base):
         e.table.selectRow(4)
         f = e._current_form(); f.e_level.setText("2"); W.QMessageBox.calls.clear(); e.b_upd.click()
         self.assertIn("奇数", msgs("warn")[0][2])
-        e.table.selectRow(7); f = e._current_form(); f.e_rid.setText("DF"); W.QMessageBox.calls.clear(); e.b_upd.click()
+        e.table.selectRow(8); f = e._current_form(); f.e_rid.setText("DF"); W.QMessageBox.calls.clear(); e.b_upd.click()
         self.assertIn("2 字节", msgs("warn")[0][2])
-        f.e_rid.setText("DF FE"); f.e_data.setText("{bogus}"); W.QMessageBox.calls.clear(); e.b_upd.click()
+        f.e_rid.setText("DF FE"); f.e_rid_file.setText("1234 56"); W.QMessageBox.calls.clear(); e.b_upd.click()
+        self.assertIn("全文件CRC标识符", msgs("warn")[0][2])
+        e.table.selectRow(6); f = e._current_form(); f.e_ext.setText("A5 B6"); W.QMessageBox.calls.clear(); e.b_upd.click()
+        self.assertIn("扩展字节", msgs("warn")[0][2])
+        f.c_kind.setCurrentIndex(3); f.e_data.setText("{bogus}"); W.QMessageBox.calls.clear(); e.b_upd.click()
         self.assertIn("占位符", msgs("warn")[0][2])
 
     def test_save_open_roundtrip_with_relative_paths(self):
@@ -481,7 +506,7 @@ class FlashTests(Base):
         self.assertFalse(self.w.dirty)
         self.w.editor.b_clr.click(); self.assertTrue(self.w.dirty); self.assertEqual(self.w.editor.table.rowCount(), 0)
         self.w.editor.b_open.click()                                          # same path from the dialog stub
-        self.assertEqual(self.w.editor.table.rowCount(), 9)
+        self.assertEqual(self.w.editor.table.rowCount(), 10)
         self.w.apply_to_executor()
         self.assertEqual(self.w.executor.base_dir, self.tmp)
 
@@ -489,13 +514,14 @@ class FlashTests(Base):
         self.prep("new")
         self.run_exec()
         ex = self.w.executor
-        self.assertEqual(self.card_colors(), [qt_color("#5FAE5B")] * 9)
+        self.assertEqual(self.card_colors(), [qt_color("#5FAE5B")] * 10)
         self.assertEqual(ex.b_start.text(), "开始刷写"); self.assertEqual(ex.bar.value(), 100)
         self.assertTrue(msgs("info")[-1][1] == "完成")
         types = {ex.table.item(r, 1).text() for r in range(ex.table.rowCount())}
         self.assertTrue({"请求", "响应", "信息", "完成"} <= types)
         ecu = self.ctx.dev.sim_ecu(0)
-        self.assertEqual(ecu.reset_count, 1); self.assertEqual(ecu.crc_checked, [(0x0102, True)]); self.assertEqual(len(ecu.seed), 16)
+        self.assertEqual(ecu.reset_count, 1); self.assertEqual(ecu.crc_checked, [(0x0102, True), (0x0103, True)]); self.assertEqual(len(ecu.seed), 16)
+        self.assertEqual(ecu.erased, [(0, 2500, b"\x01")])                  # erase: file start / total size / ext byte
         data = open(self.fw, "rb").read()
         self.assertEqual(bytes(ecu.mem[i] for i in range(len(data))), data)
 
@@ -503,25 +529,26 @@ class FlashTests(Base):
         self.prep("old")
         self.run_exec()
         ecu = self.ctx.dev.sim_ecu(0)
-        self.assertEqual(self.card_colors(), [qt_color("#5FAE5B")] * 9)
-        self.assertEqual((len(ecu.seed), ecu.crc_checked), (2, [(0xDFFE, True)]))
+        self.assertEqual(self.card_colors(), [qt_color("#5FAE5B")] * 10)
+        self.assertEqual((len(ecu.seed), ecu.crc_checked), (2, [(0xDFFE, True), (0xDFFD, True)]))
+        self.assertEqual(ecu.erase_requests[0][:5], bytes.fromhex("31 01 DF FF 44"))
 
     def test_product_mismatch_marks_failing_card_and_stops(self):
         def mut(p):
             for s in p.steps:
-                if s["type"] == "routine": s["rid"] = "DF FE"          # new ECU doesn't know it
+                if s.get("rkind") == "crc": s["rid"] = "DF FE"         # new ECU doesn't know it
         self.prep("new", mut)
         self.run_exec()
         cols = self.card_colors()
-        self.assertEqual(cols[:7], [qt_color("#5FAE5B")] * 7); self.assertEqual(cols[7], qt_color("#D9534F"))
-        self.assertEqual(cols[8], qt_color("#6C8EBF"))                    # never ran
+        self.assertEqual(cols[:7], [qt_color("#5FAE5B")] * 7); self.assertEqual(cols[7], qt_color("#D9534F"))   # caught after segment 1
+        self.assertEqual(cols[8:], [qt_color("#6C8EBF")] * 2)             # never ran
         self.assertEqual(self.ctx.dev.sim_ecu(0).reset_count, 0)
         self.assertTrue(msgs("warn"))
 
     def test_preflight_blocks_start_and_lists_problems(self):
         self.prep("new", lambda p: [s.__setitem__("file", "/no/such.bin") for s in p.steps if s["type"] == "download"])
         self.run_exec()
-        self.assertEqual(len(msgs("warn")), 1); self.assertIn("步骤7", msgs("warn")[0][2])
+        self.assertEqual(len(msgs("warn")), 1); self.assertIn("步骤8", msgs("warn")[0][2])
         self.assertEqual(self.ctx.dev.owners, {})                         # never touched the device
 
     def test_repeat_count_and_gap(self):
