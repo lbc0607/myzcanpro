@@ -15,6 +15,10 @@ jobs:
       - run: python tests/run_all.py
         env:
           QT_QPA_PLATFORM: offscreen
+      - name: Real-Qt smoke test (offscreen)
+        run: python tests/smoke_qt.py
+        env:
+          QT_QPA_PLATFORM: offscreen
       - run: >
           python -m PyInstaller --noconfirm --clean --windowed --name myzcanpro --onedir run_app.py
           --hidden-import zdiag --hidden-import zdiag_ui --exclude-module PySide2 --exclude-module tkinter
