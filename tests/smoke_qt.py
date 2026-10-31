@@ -88,7 +88,11 @@ def main() -> int:
     cd.show()
     check("channel dialog builds (FD)", cd.c_dbaud.isEnabled())
     cd.close()
+    for key in ("uds", "flash", "send"):                  # a channel serves one window at a time: close them again
+        L.windows[key].close()
+    check("no window keeps the channel", ctx.dev.owners == {})
     # --- 普通发送
+    L._open("send")
     t = L.windows["send"].tabs.widget(0)
     t.e_id.setText("7e2"); t.e_data.setText("02 10 01"); t.b_now.click()
     pump(lambda: not t.running() and ctx.dev.stats_of(0).snapshot()[1] >= 1, 10)
@@ -99,10 +103,13 @@ def main() -> int:
     pump(lambda: not t.running(), 10)
     check("list send finished", not t.running())
     # --- UDS诊断
+    L._open("uds")
     dw = L.windows["uds"]
     dw.e_pdu.setText("22 F1 90"); dw.b_now.click()
     check("uds 22 F190 answered", pump(lambda: any(e.kind == "RSP" and e.data[:3] == bytes([0x62, 0xF1, 0x90]) for e in dw.events)))
     # --- ECU刷新 (two-segment HEX, erase + segment/whole-file CRC)
+    dw.close()
+    L._open("flash")
     fw = L.windows["flash"]
     d = tempfile.mkdtemp()
     hexp, drv = os.path.join(d, "app.hex"), os.path.join(d, "drv.bin")
