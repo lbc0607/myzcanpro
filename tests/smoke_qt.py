@@ -108,6 +108,8 @@ def main() -> int:
     t.b_list.click()
     pump(lambda: not t.running(), 10)
     check("list send finished", not t.running())
+    L.windows["send"].close()
+    check("send window released the channel", pump(lambda: ctx.dev.owners == {}, 5))   # release runs in the GUI thread
     # --- UDS诊断
     L._open("uds")
     dw = L.windows["uds"]
@@ -115,6 +117,7 @@ def main() -> int:
     check("uds 22 F190 answered", pump(lambda: any(e.kind == "RSP" and e.data[:3] == bytes([0x62, 0xF1, 0x90]) for e in dw.events)))
     # --- ECU刷新 (two-segment HEX, erase + segment/whole-file CRC)
     dw.close()
+    pump(lambda: ctx.dev.owners == {}, 5)
     L._open("flash")
     fw = L.windows["flash"]
     d = tempfile.mkdtemp()
