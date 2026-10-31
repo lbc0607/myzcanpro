@@ -11,6 +11,7 @@ import threading
 from typing import Callable, Dict, List, Optional
 
 from .busstats import BusStats, ChannelCfg, CountingBus
+from .monitor import FrameTap
 from .project import DEVICES, SIM_DEVICE
 
 
@@ -50,8 +51,8 @@ def bitrate_choices_kbps(device: str) -> List[float]:
 
 
 class _Chan:
-    def __init__(self, cfg: ChannelCfg, bus, stats: BusStats) -> None:
-        self.cfg, self.bus, self.stats = cfg, bus, stats
+    def __init__(self, cfg: ChannelCfg, bus, stats: BusStats, n: int = 0) -> None:
+        self.cfg, self.bus, self.stats, self.n = cfg, bus, stats, n
         self.ecu = None                  # simulator only
         self.sim_key = None
 
@@ -67,6 +68,7 @@ class DeviceManager:
         self.owners: Dict[int, object] = {}
         self.listeners: List[Callable[[], None]] = []
         self._lock = threading.RLock()
+        self.tap = FrameTap()                    # passive monitor shared by all channels (see zdiag/monitor.py)
 
     # ------------------------------------------------------------ observers
     def add_listener(self, fn) -> None:
@@ -149,6 +151,7 @@ class DeviceManager:
             self.device = None
             self.name = None
             self.owners.clear()
+            self.tap.stop_record()
 
     # ------------------------------------------------------------ channels
     def start_channel(self, n: int, cfg: ChannelCfg, sim_addr=None, sim_profile: str = "new",
@@ -168,14 +171,14 @@ class DeviceManager:
                 raise ConnError(str(e))
             stats = BusStats(cfg.bitrate, cfg.data_bitrate)
             if self.name == SIM_DEVICE:
-                ch = _Chan(cfg, None, stats)
+                ch = _Chan(cfg, None, stats, n)
                 self._build_sim(ch, sim_addr, sim_profile, sim_padding)
             else:
                 try:
-                    bus = self.device.start_channel(n, cfg)
+                    bus = self.device.start_channel(n, cfg, self.tap)
                 except Exception as e:
                     raise ConnError(f"启动通道{n} 失败: {e}")
-                ch = _Chan(cfg, bus, bus.stats)
+                ch = _Chan(cfg, bus, bus.stats, n)
             self.chans[n] = ch
         self._notify()
 
@@ -186,6 +189,8 @@ class DeviceManager:
         if ch.ecu is not None:
             ch.ecu.stop()
         bus, ecu = make_sim(addr, profile, padding=padding)
+        n, tap = ch.n, self.tap
+        bus.tap = lambda fr, d: tap.feed(n, fr, d)                     # tester end of the virtual bus: TX / RX
         ch.bus, ch.ecu = CountingBus(bus, ch.stats), ecu
         ch.sim_key = (profile, addr.phys, addr.resp, padding)
 

@@ -159,12 +159,12 @@ class ZlgDevice:
         if self.lib.ZCAN_SetValue(self.handle, path.encode(), str(value).encode()) != STATUS_OK:
             raise ZlgError(f"ZCAN_SetValue({path}={value}) 失败")
 
-    def start_channel(self, channel: int, cfg: ChannelCfg) -> "ZlgBus":
+    def start_channel(self, channel: int, cfg: ChannelCfg, tap=None) -> "ZlgBus":
         if channel in self.buses:
             raise ZlgError(f"通道{channel} 已经启动")
         if cfg.is_fd and not self.is_fd_dev:
             raise ZlgError("该设备不支持 CAN FD")
-        bus = ZlgBus(self, channel, cfg)
+        bus = ZlgBus(self, channel, cfg, tap)
         self.buses[channel] = bus
         return bus
 
@@ -184,8 +184,10 @@ class ZlgDevice:
 class ZlgBus(Bus):
     """One started channel of a ZlgDevice.  Owns the rx thread and the BusStats."""
 
-    def __init__(self, device: ZlgDevice, channel: int, cfg: ChannelCfg) -> None:
+    def __init__(self, device: ZlgDevice, channel: int, cfg: ChannelCfg, tap=None) -> None:
         self.device, self.channel, self.cfg = device, channel, cfg
+        self.tap = tap                                            # passive monitor (zdiag.monitor.FrameTap) or None
+        self._clk: Optional[float] = None                         # host time - device time (s), fixed at the first frame
         self.use_fd = cfg.is_fd
         self.stats = BusStats(cfg.bitrate, cfg.data_bitrate)
         L, ch = device.lib, channel
@@ -222,6 +224,14 @@ class ZlgBus(Bus):
         self._thr = threading.Thread(target=self._rx_loop, name=f"zlg-rx{ch}", daemon=True)
         self._thr.start()
 
+    def _host_ts(self, dev_us: float) -> float:
+        """Device timestamp mapped onto the host perf_counter clock (keeps the device's inter-frame precision)."""
+        dev = dev_us / 1e6
+        off = time.perf_counter() - dev
+        if self._clk is None or abs(off - self._clk) > 0.5:          # first frame, or the device clock was reset
+            self._clk = off
+        return dev + self._clk
+
     def _rx_loop(self) -> None:
         L = self.lib
         buf = (ZCAN_Receive_Data * 100)()
@@ -235,10 +245,14 @@ class ZlgBus(Bus):
                     f = buf[i].frame
                     if f.err:
                         self.stats.count_err()
+                        if self.tap is not None:
+                            self.tap.feed_err(self.channel)
                         continue
                     fr = CanFrame(f.can_id, bytes(f.data[:f.can_dlc]), bool(f.eff),
-                                  False, False, buf[i].timestamp / 1e6)
+                                  False, False, buf[i].timestamp / 1e6, bool(f.rtr))
                     self.stats.count_rx(fr)
+                    if self.tap is not None:
+                        self.tap.feed(self.channel, fr, "RX", self._host_ts(buf[i].timestamp))
                     if not f.rtr:
                         self._q.put(fr)
                 got = got or k > 0
@@ -250,10 +264,14 @@ class ZlgBus(Bus):
                         f = fbuf[i].frame
                         if f.err:
                             self.stats.count_err()
+                            if self.tap is not None:
+                                self.tap.feed_err(self.channel)
                             continue
                         fr = CanFrame(f.can_id, bytes(f.data[:f.len]), bool(f.eff),
-                                      True, bool(f.flags & 1), fbuf[i].timestamp / 1e6)
+                                      True, bool(f.flags & 1), fbuf[i].timestamp / 1e6, bool(f.rtr))
                         self.stats.count_rx(fr)
+                        if self.tap is not None:
+                            self.tap.feed(self.channel, fr, "RX", self._host_ts(fbuf[i].timestamp))
                         if not f.rtr:
                             self._q.put(fr)
                     got = got or k > 0
@@ -290,6 +308,8 @@ class ZlgBus(Bus):
             self.stats.count_err()
             raise ZlgError("发送失败(总线关闭/发送缓冲满/无应答?)")
         self.stats.count_tx(fr)
+        if self.tap is not None:
+            self.tap.feed(self.channel, fr, "TX")
 
     def recv(self, timeout: float) -> Optional[CanFrame]:
         try:

@@ -46,7 +46,8 @@ class LauncherWindow(W.QMainWindow):
         self._build_device_panel(v)
         self.b_uds, self.b_flash, self.b_crc = W.QPushButton("UDS诊断"), W.QPushButton("ECU刷新"), W.QPushButton("校验码计算工具")
         self.b_send = W.QPushButton("普通发送")
-        for b in (self.b_uds, self.b_flash, self.b_send, self.b_crc):
+        self.b_mon = W.QPushButton("报文监视")
+        for b in (self.b_uds, self.b_flash, self.b_send, self.b_mon, self.b_crc):
             b.setMinimumHeight(40)
             v.addWidget(b)
         self.l_info = W.QLabel("")
@@ -55,6 +56,7 @@ class LauncherWindow(W.QMainWindow):
         self.b_uds.clicked.connect(lambda: self._open("uds"))
         self.b_flash.clicked.connect(lambda: self._open("flash"))
         self.b_send.clicked.connect(lambda: self._open("send"))
+        self.b_mon.clicked.connect(lambda: self._open("monitor"))
         self.b_crc.clicked.connect(lambda: self._open("crc"))
         self._status()
 
@@ -182,6 +184,9 @@ class LauncherWindow(W.QMainWindow):
             if which == "uds":
                 from .diag_window import DiagWindow
                 win = DiagWindow(self.ctx)
+            elif which == "monitor":
+                from .monitor_window import MonitorWindow
+                win = MonitorWindow(self.ctx)
             elif which == "send":
                 from .send_window import SendWindow
                 win = SendWindow(self.ctx)

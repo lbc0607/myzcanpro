@@ -226,5 +226,39 @@ class ZlgInitSequenceTests(unittest.TestCase):
         d.close()
 
 
+class ZlgRxTapTests(unittest.TestCase):
+    """The rx thread feeds the UDS queue AND the monitor tap from one read of the device."""
+
+    def test_rx_thread_feeds_queue_and_tap_with_device_timestamps(self):
+        from zdiag.monitor import FrameTap
+        from zdiag.zlgcan_bus import DEVICE_TYPES, FD_TYPES, ZlgDevice
+        pending = [(0x7EA, b"\x03\x62\xf1\x90", 1_000_000), (0x7EA, b"\x10\x14", 1_001_500), (0x123, b"\x01", 1_002_000)]
+
+        class Lib(FakeLib):
+            def ZCAN_GetReceiveNum(self, chn, t): return len(pending) if t == 0 else 0
+            def ZCAN_Receive(self, chn, buf, n, wait):
+                k = 0
+                while pending and k < n:
+                    cid, data, ts = pending.pop(0)
+                    buf[k].frame.can_id, buf[k].frame.can_dlc, buf[k].timestamp = cid, len(data), ts
+                    for i, b in enumerate(data):
+                        buf[k].frame.data[i] = b
+                    k += 1
+                return k
+
+        d = ZlgDevice.__new__(ZlgDevice)
+        d.name, d.dev_type, d.lib, d.handle, d.buses = "USBCAN-II", DEVICE_TYPES["USBCAN-II"], Lib(), 1, {}
+        d.is_fd_dev = d.dev_type in FD_TYPES
+        tap = FrameTap()
+        bus = d.start_channel(0, ChannelCfg(), tap)
+        got = [bus.recv(1.0) for _ in range(3)]                        # the diagnostic side still gets every frame
+        d.close()
+        self.assertEqual([g.can_id for g in got], [0x7EA, 0x7EA, 0x123])
+        rows = {r.can_id: r for r in tap.snapshot()}
+        self.assertEqual((rows[0x7EA].count, rows[0x123].count), (2, 1))
+        self.assertAlmostEqual(rows[0x7EA].dt_id, 0.0015, places=6)     # device timestamps keep the real spacing
+        self.assertAlmostEqual(rows[0x123].dt_prev, 0.0005, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

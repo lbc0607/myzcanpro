@@ -13,6 +13,7 @@ from zdiag_ui.appctx import AppContext
 from zdiag_ui.launcher import LauncherWindow
 from zdiag_ui.diag_window import DiagWindow
 from zdiag_ui.send_window import SendWindow
+from zdiag_ui.monitor_window import MonitorWindow
 from zdiag_ui.flash_window import FlashWindow, relativize
 from zdiag_ui.dialogs import CrcConfigWidget, CrcToolDialog, ServiceEditorDialog, SettingsDialog
 from zdiag_ui import qt as _qt
@@ -391,6 +392,62 @@ class DiagWindowTests(Base):
 
 def w_counts(w):
     return w.counts["tested"]
+
+
+class MonitorTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.w = MonitorWindow(self.ctx); self.addCleanup(self.w.close)
+
+    def rows(self):
+        t = self.w.table
+        return [[t.item(r, c).text() for c in range(t.columnCount())] for r in range(t.rowCount())]
+
+    def traffic(self):
+        win = DiagWindow(self.ctx)
+        win.tree.setCurrentItem(self.tree_item(win, 0x10, 3)); win.e_pdu.setText("10 03"); win.b_now.click()
+        win.close()
+
+    def test_shows_uds_traffic_overwriting_by_id(self):
+        self.traffic(); self.traffic()
+        self.w.refresh()
+        rows = {(r[3], r[5]): r for r in self.rows()}
+        req = rows[("7E2", "发送")]; rsp = rows[("7EA", "接收")]
+        self.assertEqual((req[2], req[4], req[6], req[7]), ("0", "CAN", "8", "02 10 03 55 55 55 55 55"))   # tester pads 55
+        self.assertEqual(req[8], "2"); self.assertGreaterEqual(int(rsp[8]), 2); self.assertTrue(rsp[7].endswith("AA"), rsp)        # ECU pads AA
+        self.assertEqual(len(self.rows()), len(set((r[3], r[5]) for r in self.rows())))                  # one row per id
+        self.assertEqual(self.w.l_tx.text(), "发送帧计数: 2")
+
+    def test_delta_mode_filters_pause_and_trace(self):
+        self.traffic(); w = self.w; w.refresh()
+        w.c_delta.setCurrentIndex(1); w.refresh()
+        self.assertTrue(all(float(r[9]) >= 0 for r in self.rows()))
+        w.c_dir.setCurrentText("发送"); w.refresh(); self.assertEqual({r[5] for r in self.rows()}, {"发送"})
+        w.c_dir.setCurrentText("全部"); w.e_id.setText("7ea"); w.refresh(); self.assertEqual({r[3] for r in self.rows()}, {"7EA"})
+        w.e_id.setText(""); w.c_type.setCurrentText("CAN FD"); w.refresh(); self.assertEqual(self.rows(), [])
+        w.c_type.setCurrentText("全部"); w.refresh(); n = len(self.rows())
+        w.b_pause.click(); self.traffic(); w.refresh(); self.assertEqual(len(self.rows()), n)             # frozen
+        self.assertEqual(w.b_pause.text(), "继续"); w.b_pause.click(); self.assertGreaterEqual(len(self.rows()), n)
+        w.k_by_id.setChecked(False); w.refresh(); self.assertGreater(len(self.rows()), n)                # scrolling trace
+        w._clear(); self.assertEqual(self.rows(), [])
+
+    def test_realtime_save_and_snapshot(self):
+        d = tempfile.mkdtemp(); p = os.path.join(d, "live.csv"); q = os.path.join(d, "snap.csv")
+        W.QFileDialog.next_path = p; self.w.b_rec.click()
+        self.assertEqual(self.w.b_rec.text(), "停止保存"); self.assertIn("正在保存", self.w.l_state.text())
+        self.traffic()
+        self.w.b_rec.click()                                                                              # stop
+        self.assertEqual(self.w.b_rec.text(), "实时保存"); self.assertTrue(msgs("info"))
+        with open(p, encoding="utf-8-sig") as f:
+            lines = f.read().splitlines()
+        self.assertGreater(len(lines), 3); self.assertIn(",7E2,CAN,发送,8,02 10 03 55 55 55 55 55", lines[1] + "\n".join(lines))
+        W.QFileDialog.next_path = q; self.w.b_save.click()
+        with open(q, encoding="utf-8-sig") as f:
+            self.assertGreater(len(f.read().splitlines()), 2)
+
+    def test_launcher_button_opens_it(self):
+        L = LauncherWindow(self.ctx); L._open("monitor")
+        self.assertTrue(L.windows["monitor"].isVisible()); L.windows["monitor"].close(); L.close()
 
 
 class FlashTests(Base):

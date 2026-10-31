@@ -42,6 +42,7 @@ class VirtualBus(Bus):
         self._rx: "queue.Queue[CanFrame]" = queue.Queue()
         self.peer: Optional["VirtualBus"] = None
         self.log: list = []          # every frame sent from this end, for inspection
+        self.tap = None              # optional callback(frame, "TX"|"RX") for the passive monitor (this end's point of view)
 
     @staticmethod
     def pair():
@@ -53,6 +54,10 @@ class VirtualBus(Bus):
         frame.timestamp = time.perf_counter()
         self.log.append(frame)
         self.peer._rx.put(frame)
+        if self.tap is not None:
+            self.tap(frame, "TX")
+        if self.peer.tap is not None:
+            self.peer.tap(frame, "RX")
 
     def recv(self, timeout: float) -> Optional[CanFrame]:
         try:

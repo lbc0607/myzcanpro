@@ -76,7 +76,7 @@ def main() -> int:
         p.b_toggle.click()
     check("both channels started", ctx.dev.started() == [0, 1])
     # --- every window / dialog can be built and shown
-    for key in ("uds", "flash", "send", "crc"):
+    for key in ("uds", "flash", "send", "monitor", "crc"):
         L._open(key)
         check(f"window {key} shows", L.windows[key].isVisible())
     dlg = dialogs.SettingsDialog(ctx, ctx.diag_cfg, ctx.channel)
@@ -91,6 +91,12 @@ def main() -> int:
     for key in ("uds", "flash", "send"):                  # a channel serves one window at a time: close them again
         L.windows[key].close()
     check("no window keeps the channel", ctx.dev.owners == {})
+    # --- 报文监视 stays open (and records) while everything below runs
+    mon = L.windows["monitor"]
+    rec_path = os.path.join(tempfile.mkdtemp(), "live.csv")
+    W.QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (rec_path, ""))
+    mon.b_rec.click()
+    check("monitor recording started", ctx.dev.tap.recorder is not None)
     # --- 普通发送
     L._open("send")
     t = L.windows["send"].tabs.widget(0)
@@ -130,6 +136,17 @@ def main() -> int:
     ecu = ctx.dev.sim_ecu(0)
     check("ECU saw erase + 3 CRC checks + reset",
           ecu.erased == [(0x08000000, 40, b"\x01")] and [c[1] for c in ecu.crc_checked] == [True] * 3 and ecu.reset_count == 1)
+    # --- monitor saw everything, in parallel to the flash session
+    mon.refresh(force=True)
+    tb = mon.table
+    rows = [[tb.item(r, c).text() for c in range(tb.columnCount())] for r in range(tb.rowCount())]
+    tx = [r for r in rows if r[3] == "7E2" and r[5] == "发送"]
+    check("monitor shows tester TX row for 7E2 with many frames", bool(tx) and int(tx[0][8]) > 50)
+    check("monitor shows ECU response row", any(r[3] == "7EA" and r[5] == "接收" for r in rows))
+    mon.b_rec.click()
+    with open(rec_path, encoding="utf-8-sig") as f:
+        nlines = len(f.read().splitlines())
+    check("recording file has the frames", nlines > 100)
     # --- stats / bus load on the launcher
     L.refresh_stats(); pump(timeout=0.6); L.refresh_stats()
     check("launcher shows counters", L.panels[0].l_tx.text() != "发送: 0")
