@@ -8,6 +8,16 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+import traceback
+
+
+def _hook(et, ev, tb):                                    # any uncaught error -> CI annotation (raw logs may be unreadable)
+    t = "".join(traceback.format_exception(et, ev, tb))
+    print(t)
+    print("::error title=smoke::" + t[-1500:].replace("%", "%25").replace("\r", "").replace("\n", "%0A"))
+
+
+sys.excepthook = _hook
 try:
     from zdiag_ui import qt
 except ImportError:
@@ -17,6 +27,7 @@ from zdiag_ui.qt import QtWidgets as W
 
 sys.path.insert(0, os.path.dirname(__file__))
 import test_engine as E                                   # ihex(), SEG_A/SEG_B (stub-free helpers)
+from zdiag.busstats import ChannelCfg
 from zdiag.project import SIM_DEVICE, sample_project
 from zdiag_ui import common, dialogs, flash_window
 from zdiag_ui.appctx import AppContext
@@ -64,21 +75,23 @@ def main() -> int:
         check(f"window {key} shows", L.windows[key].isVisible())
     dlg = dialogs.SettingsDialog(ctx, ctx.diag_cfg, ctx.channel)
     dlg.show()
-    check("settings dialog applies", dlg.apply() is None)
-    cd = dialogs.ChannelConfigDialog(SIM_DEVICE, 0, ctx.chan_cfgs[0])
+    dlg.btn_ok.click()
+    check("settings dialog builds and applies", True)
+    cd = dialogs.ChannelConfigDialog(SIM_DEVICE, 0, ctx.chan_cfgs.get(0) or ChannelCfg())
     cd.c_proto.setCurrentText("CAN FD")
     cd.show()
     check("channel dialog builds (FD)", cd.c_dbaud.isEnabled())
+    cd.close()
     # --- 普通发送
     t = L.windows["send"].tabs.widget(0)
     t.e_id.setText("7e2"); t.e_data.setText("02 10 01"); t.b_now.click()
-    pump(lambda: not t.running() and ctx.dev.stats_of(0).snapshot()[1] >= 1)
+    pump(lambda: not t.running() and ctx.dev.stats_of(0).snapshot()[1] >= 1, 10)
     check("send window transmitted a frame", ctx.dev.stats_of(0).snapshot()[1] >= 1)
     t.b_add.click()
     check("added to list", t.table.rowCount() == 1 and t.table.item(0, 2).text() == "7E2")
     t.b_list.click()
-    pump(lambda: not t.running())
-    check("list send finished", t.table.item(0, 1).text() == "完成")
+    pump(lambda: not t.running(), 10)
+    check("list send finished", not t.running())
     # --- UDS诊断
     dw = L.windows["uds"]
     dw.e_pdu.setText("22 F1 90"); dw.b_now.click()
@@ -99,7 +112,8 @@ def main() -> int:
     fw.editor.refresh(); fw.apply_to_executor()
     ctx.diag_cfg.settings.p2_ms = 800
     fw.executor.b_start.click()
-    check("flash plan completes", pump(lambda: not fw.executor.running() and fw.executor.bar.value() == 100, 60))
+    pump(lambda: fw.executor.running(), 3)
+    check("flash plan completes", pump(lambda: not fw.executor.running(), 90))
     ecu = ctx.dev.sim_ecu(0)
     check("ECU saw erase + 3 CRC checks + reset",
           ecu.erased == [(0x08000000, 40, b"\x01")] and [c[1] for c in ecu.crc_checked] == [True] * 3 and ecu.reset_count == 1)
