@@ -120,7 +120,21 @@ def main() -> int:
     return 1 if failures else 0
 
 
+def _annot(level, msg):
+    """GitHub Actions annotation (readable through the API even when the raw log is not)."""
+    print("::%s title=smoke::%s" % (level, msg.replace("%", "%25").replace("\r", "").replace("\n", "%0A")))
+
+
 if __name__ == "__main__":
-    rc = main()
+    import traceback
+    try:
+        rc = main()
+    except BaseException:
+        tb = traceback.format_exc()
+        print(tb)
+        _annot("error", tb[-1500:])
+        rc = 1
+    if failures:
+        _annot("error", "FAILED checks: " + "; ".join(failures))
     print("SMOKE", "FAILED" if rc else "PASSED", f"(binding: {qt.BINDING})")
     sys.exit(rc)
