@@ -10,6 +10,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import traceback
 
+for _st in (sys.stdout, sys.stderr):                      # Windows console is cp1252: Chinese labels would raise on print
+    try:
+        _st.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 def _hook(et, ev, tb):                                    # any uncaught error -> CI annotation (raw logs may be unreadable)
     t = "".join(traceback.format_exception(et, ev, tb))
