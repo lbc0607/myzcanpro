@@ -246,7 +246,7 @@ class ZlgBus(Bus):
                     if f.err:
                         self.stats.count_err()
                         if self.tap is not None:
-                            self.tap.feed_err(self.channel)
+                            self.tap.feed_err(self.channel, self._host_ts(buf[i].timestamp))
                         continue
                     fr = CanFrame(f.can_id, bytes(f.data[:f.can_dlc]), bool(f.eff),
                                   False, False, buf[i].timestamp / 1e6, bool(f.rtr))
@@ -265,7 +265,7 @@ class ZlgBus(Bus):
                         if f.err:
                             self.stats.count_err()
                             if self.tap is not None:
-                                self.tap.feed_err(self.channel)
+                                self.tap.feed_err(self.channel, self._host_ts(fbuf[i].timestamp))
                             continue
                         fr = CanFrame(f.can_id, bytes(f.data[:f.len]), bool(f.eff),
                                       True, bool(f.flags & 1), fbuf[i].timestamp / 1e6, bool(f.rtr))

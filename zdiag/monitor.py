@@ -30,7 +30,7 @@ def fmt_data(fr: CanFrame) -> str:
 
 
 class Row:
-    __slots__ = ("seq", "ch", "dir", "can_id", "ext", "fd", "brs", "rtr", "data", "count", "ts", "dt_id", "dt_prev")
+    __slots__ = ("seq", "ch", "dir", "can_id", "ext", "fd", "brs", "rtr", "data", "count", "ts", "dt_id", "dt_prev", "err")
 
     def __init__(self, seq, ch, direction, fr: CanFrame, ts: float, dt_prev: float) -> None:
         self.seq, self.ch, self.dir = seq, ch, direction
@@ -40,6 +40,7 @@ class Row:
         self.ts = ts
         self.dt_id = 0.0                 # seconds since the previous frame with the same key
         self.dt_prev = dt_prev           # seconds since the previous frame on the bus (any id)
+        self.err = False                 # bus error frame (content not decoded, shown as "xxx")
 
     def copy(self) -> "Row":
         r = Row.__new__(Row)
@@ -49,14 +50,20 @@ class Row:
 
     @property
     def id_text(self) -> str:
+        if self.err:
+            return "错误帧"
         return fmt_id(self.can_id, self.ext)
 
     @property
     def type_text(self) -> str:
+        if self.err:
+            return "-"
         return "CAN FD" if self.fd else "CAN"
 
     @property
     def data_text(self) -> str:
+        if self.err:
+            return "xxx"
         return "[远程帧]" if self.rtr else self.data.hex(" ").upper()
 
 
@@ -130,7 +137,7 @@ class FrameTap:
             self.total = 0
 
     # ------------------------------------------------------------ producers (rx threads / send paths)
-    def feed(self, ch: int, fr: CanFrame, direction: str, ts: Optional[float] = None) -> None:
+    def feed(self, ch: int, fr: CanFrame, direction: str, ts: Optional[float] = None, err: bool = False) -> None:
         ts = time.perf_counter() if ts is None else ts
         with self._lock:
             if self._t0 is None:
@@ -138,11 +145,12 @@ class FrameTap:
             dt_prev = 0.0 if self._last_ts is None else max(0.0, ts - self._last_ts)
             self._last_ts = max(ts, self._last_ts or ts)
             self.total += 1
-            key = (ch, direction, fr.can_id, fr.extended)
+            key = (ch, "ERR") if err else (ch, direction, fr.can_id, fr.extended)
             row = self._rows.get(key)
             if row is None:
                 self._seq += 1
                 row = Row(self._seq, ch, direction, fr, ts, dt_prev)
+                row.err = err
                 self._rows[key] = row
             else:
                 row.dt_id = max(0.0, ts - row.ts)
@@ -152,13 +160,17 @@ class FrameTap:
             snap = row.copy()
             self._ring.append(snap)
             rec, t0, n = self.recorder, self._t0, self.total
-        if rec is not None:
+        if rec is not None and err:
+            rec.put(f"{n},{ts - t0:.6f},{ch},错误帧,-,接收,,xxx\n")
+        elif rec is not None:
             rec.put(f"{n},{ts - t0:.6f},{ch},{fmt_id(fr.can_id, fr.extended)},{frame_type(fr)},"
                     f"{'发送' if direction == TX else '接收'},{len(fr.data)},{fmt_data(fr)}\n")
 
-    def feed_err(self, ch: int) -> None:
+    def feed_err(self, ch: int, ts: Optional[float] = None) -> None:
+        """A bus error frame: one 'ErrorFrame' row per channel (count + time delta = error frequency)."""
         with self._lock:
             self.errors += 1
+        self.feed(ch, CanFrame(0, b""), RX, ts, err=True)
 
     # ------------------------------------------------------------ consumers (GUI thread)
     @property
@@ -191,5 +203,5 @@ class FrameTap:
             f.write("序号,时间标识(s),通道,帧ID,CAN类型,方向,长度,数据,计数,与同ID上一帧时间差(ms),与上一帧时间差(ms)\n")
             for i, r in enumerate(rows, 1):
                 f.write(f"{i},{r.ts - t0:.6f},{r.ch},{r.id_text},{r.type_text},{'发送' if r.dir == TX else '接收'},"
-                        f"{len(r.data)},{r.data_text},{r.count},{r.dt_id * 1000:.3f},{r.dt_prev * 1000:.3f}\n")
+                        f"{'' if r.err else len(r.data)},{r.data_text},{r.count},{r.dt_id * 1000:.3f},{r.dt_prev * 1000:.3f}\n")
         return len(rows)

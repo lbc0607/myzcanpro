@@ -431,6 +431,12 @@ class MonitorTests(Base):
         w.k_by_id.setChecked(False); w.refresh(); self.assertGreater(len(self.rows()), n)                # scrolling trace
         w._clear(); self.assertEqual(self.rows(), [])
 
+    def test_error_frames_listed_and_hideable(self):
+        self.ctx.dev.tap.feed_err(0); self.ctx.dev.tap.feed_err(0)
+        self.w.refresh(); errs = [r for r in self.rows() if r[3] == "错误帧"]
+        self.assertEqual(len(errs), 1); self.assertEqual((errs[0][7], errs[0][8], errs[0][4]), ("xxx", "2", "-"))
+        self.w.k_err.setChecked(False); self.w.refresh(); self.assertEqual([r for r in self.rows() if r[3] == "错误帧"], [])
+
     def test_realtime_save_and_snapshot(self):
         d = tempfile.mkdtemp(); p = os.path.join(d, "live.csv"); q = os.path.join(d, "snap.csv")
         W.QFileDialog.next_path = p; self.w.b_rec.click()

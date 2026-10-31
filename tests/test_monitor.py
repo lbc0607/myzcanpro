@@ -23,6 +23,21 @@ class TapLogic(unittest.TestCase):
         self.assertEqual([x.seq for x in t.snapshot()], [1, 2, 3])  # first-seen order is stable
         self.assertEqual(len(t.trace()), 4); self.assertEqual(t.total, 4)
 
+    def test_error_frames_rows_frequency_and_record(self):
+        d = tempfile.mkdtemp(); p = os.path.join(d, "e.csv")
+        t = FrameTap(); t.start_record(p)
+        t.feed(0, CanFrame(0x100, b"\x01"), RX, 1.000)
+        t.feed_err(0, 1.002); t.feed_err(0, 1.007); t.feed_err(1, 1.008)
+        t.stop_record()
+        rows = t.snapshot(); errs = [r for r in rows if r.err]
+        self.assertEqual([(r.ch, r.count, r.id_text, r.data_text, r.type_text) for r in errs],
+                         [(0, 2, "错误帧", "xxx", "-"), (1, 1, "错误帧", "xxx", "-")])
+        self.assertAlmostEqual(errs[0].dt_id, 0.005)                      # interval between error frames = frequency
+        self.assertEqual(t.errors, 3)
+        self.assertEqual(sum(1 for r in t.trace() if r.err), 4 - 1)
+        with open(p, encoding="utf-8-sig") as f:
+            self.assertIn("错误帧,-,接收,,xxx", f.read())
+
     def test_channels_and_extended_are_separate_keys_and_reset(self):
         t = FrameTap()
         t.feed(0, CanFrame(0x1, b""), RX, 1.0); t.feed(1, CanFrame(0x1, b""), RX, 1.1)

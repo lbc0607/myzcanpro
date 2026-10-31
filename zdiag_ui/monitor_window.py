@@ -3,7 +3,7 @@ import time
 
 from zdiag.monitor import TX
 from .common import info, save_file, warn
-from .qt import Qt, QtCore, QtWidgets as W
+from .qt import Qt, QtCore, QtGui, QtWidgets as W
 
 HEADERS = ["序号", "时间标识(s)", "源通道", "帧ID", "CAN类型", "方向", "长度", "数据", "计数", "时间差(ms)"]
 FILTER = "CSV 文件 (*.csv);;所有文件 (*.*)"
@@ -16,6 +16,8 @@ class MonitorWindow(W.QMainWindow):
         self.ctx = ctx
         self.tap = ctx.dev.tap
         self.setWindowTitle("报文监视")
+        self._red = QtGui.QBrush(QtGui.QColor("#C0392B"))
+        self._black = QtGui.QBrush(QtGui.QColor("#000000"))
         self.resize(1100, 640)
         self._started_key = None
         self._build()
@@ -36,9 +38,11 @@ class MonitorWindow(W.QMainWindow):
         self.b_clear, self.b_pause = W.QPushButton("清空"), W.QPushButton("暂停")
         self.k_by_id = W.QCheckBox("按ID覆盖显示")
         self.k_by_id.setChecked(True)
+        self.k_err = W.QCheckBox("显示错误帧")
+        self.k_err.setChecked(True)
         self.c_delta = W.QComboBox()
         self.c_delta.addItems(DELTA_MODES)
-        for wd in (W.QLabel("通道:"), self.c_ch, self.b_rec, self.b_save, self.b_clear, self.b_pause, self.k_by_id,
+        for wd in (W.QLabel("通道:"), self.c_ch, self.b_rec, self.b_save, self.b_clear, self.b_pause, self.k_by_id, self.k_err,
                    W.QLabel("时间差:"), self.c_delta):
             top.addWidget(wd)
         top.addStretch(1)
@@ -134,6 +138,8 @@ class MonitorWindow(W.QMainWindow):
         self.c_ch.blockSignals(False)
 
     def _row_ok(self, r) -> bool:
+        if r.err:
+            return self.k_err.isChecked() and (self.c_ch.currentData() in (None, -1) or r.ch == self.c_ch.currentData())
         ch = self.c_ch.currentData()
         if ch is not None and ch >= 0 and r.ch != ch:
             return False
@@ -177,7 +183,7 @@ class MonitorWindow(W.QMainWindow):
         for i, r in enumerate(rows):
             dt = (r.dt_prev if use_prev else r.dt_id) * 1000.0
             cells = [str(r.seq if by_id else i + 1), f"{r.ts - t0:.6f}", str(r.ch), r.id_text, r.type_text,
-                     "发送" if r.dir == TX else "接收", str(len(r.data)), r.data_text,
+                     "发送" if r.dir == TX else "接收", "" if r.err else str(len(r.data)), r.data_text,
                      str(r.count) if by_id else "", f"{dt:.3f}"]
             for c, text in enumerate(cells):
                 it = tb.item(i, c)
@@ -186,6 +192,7 @@ class MonitorWindow(W.QMainWindow):
                     tb.setItem(i, c, it)
                 elif it.text() != text:
                     it.setText(text)
+                it.setForeground(self._red if r.err else self._black)
         tb.setUpdatesEnabled(True)
 
     def closeEvent(self, event) -> None:

@@ -232,7 +232,8 @@ class ZlgRxTapTests(unittest.TestCase):
     def test_rx_thread_feeds_queue_and_tap_with_device_timestamps(self):
         from zdiag.monitor import FrameTap
         from zdiag.zlgcan_bus import DEVICE_TYPES, FD_TYPES, ZlgDevice
-        pending = [(0x7EA, b"\x03\x62\xf1\x90", 1_000_000), (0x7EA, b"\x10\x14", 1_001_500), (0x123, b"\x01", 1_002_000)]
+        pending = [(0x7EA, b"\x03\x62\xf1\x90", 1_000_000), (0x7EA, b"\x10\x14", 1_001_500), (0x123, b"\x01", 1_002_000),
+                   ("ERR", b"", 1_004_000), ("ERR", b"", 1_006_000)]
 
         class Lib(FakeLib):
             def ZCAN_GetReceiveNum(self, chn, t): return len(pending) if t == 0 else 0
@@ -240,7 +241,8 @@ class ZlgRxTapTests(unittest.TestCase):
                 k = 0
                 while pending and k < n:
                     cid, data, ts = pending.pop(0)
-                    buf[k].frame.can_id, buf[k].frame.can_dlc, buf[k].timestamp = cid, len(data), ts
+                    buf[k].frame.err = 1 if cid == "ERR" else 0
+                    buf[k].frame.can_id, buf[k].frame.can_dlc, buf[k].timestamp = (0 if cid == "ERR" else cid), len(data), ts
                     for i, b in enumerate(data):
                         buf[k].frame.data[i] = b
                     k += 1
@@ -258,6 +260,9 @@ class ZlgRxTapTests(unittest.TestCase):
         self.assertEqual((rows[0x7EA].count, rows[0x123].count), (2, 1))
         self.assertAlmostEqual(rows[0x7EA].dt_id, 0.0015, places=6)     # device timestamps keep the real spacing
         self.assertAlmostEqual(rows[0x123].dt_prev, 0.0005, places=6)
+        err = [r for r in tap.snapshot() if r.err][0]
+        self.assertEqual((err.count, err.data_text), (2, "xxx")); self.assertAlmostEqual(err.dt_id, 0.002, places=6)
+        self.assertEqual(bus.stats.snapshot()[2], 2)                   # still counted in the error total
 
 
 if __name__ == "__main__":
