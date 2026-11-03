@@ -76,7 +76,7 @@ def main() -> int:
         p.b_toggle.click()
     check("both channels started", ctx.dev.started() == [0, 1])
     # --- every window / dialog can be built and shown
-    for key in ("uds", "flash", "send", "monitor", "crc"):
+    for key in ("uds", "flash", "send", "monitor", "scan", "crc"):
         L._open(key)
         check(f"window {key} shows", L.windows[key].isVisible())
     dlg = dialogs.SettingsDialog(ctx, ctx.diag_cfg, ctx.channel)
@@ -88,7 +88,7 @@ def main() -> int:
     cd.show()
     check("channel dialog builds (FD)", cd.c_dbaud.isEnabled())
     cd.close()
-    for key in ("uds", "flash", "send"):                  # a channel serves one window at a time: close them again
+    for key in ("uds", "flash", "send", "scan"):          # a channel serves one window at a time: close them again
         L.windows[key].close()
     check("no window keeps the channel", ctx.dev.owners == {})
     # --- 报文监视 stays open (and records) while everything below runs
@@ -115,9 +115,26 @@ def main() -> int:
     dw = L.windows["uds"]
     dw.e_pdu.setText("22 F1 90"); dw.b_now.click()
     check("uds 22 F190 answered", pump(lambda: any(e.kind == "RSP" and e.data[:3] == bytes([0x62, 0xF1, 0x90]) for e in dw.events)))
-    # --- ECU刷新 (two-segment HEX, erase + segment/whole-file CRC)
     dw.close()
     pump(lambda: ctx.dev.owners == {}, 5)
+    # --- 软件扫描: scan 4 software modules, open a module's functions, run one
+    ctx.scan_dir = tempfile.mkdtemp()
+    L._open("scan")
+    sw = L.windows["scan"]
+    sw.store.__init__(ctx.scan_dir); sw.store.ensure_defaults(); sw.reload_modules()
+    sw.b_start.click()
+    check("scan finishes", pump(lambda: sw.l_status.text() == "扫描完成", 60))
+    vals = [[r["fields"][k].text() for k in ("code", "version", "date", "dtc")] for r in sw.rows]
+    check("scan filled every field", len(vals) == 4 and all(v != "-" for row in vals for v in row))
+    sw.rows[0]["next"].click()
+    check("module page lists default functions", [b.text() for b, _ in sw.tile_buttons] == ["故障检测", "清除故障"])
+    sw.tile_buttons[0][0].click()
+    check("function runs", pump(lambda: sw.mpanel.l_result.text() not in ("", "运行中…"), 30) and "失败" not in sw.mpanel.l_result.text())
+    pump(lambda: ctx.dev.owners == {}, 5)
+    sw.rows and sw.b_up.click()
+    sw.close()
+    pump(lambda: ctx.dev.owners == {}, 5)
+    # --- ECU刷新 (two-segment HEX, erase + segment/whole-file CRC)
     L._open("flash")
     fw = L.windows["flash"]
     d = tempfile.mkdtemp()

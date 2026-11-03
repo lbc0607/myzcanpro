@@ -14,6 +14,8 @@ from zdiag_ui.launcher import LauncherWindow
 from zdiag_ui.diag_window import DiagWindow
 from zdiag_ui.send_window import SendWindow
 from zdiag_ui.monitor_window import MonitorWindow
+from zdiag_ui import scan_window as _sw
+from zdiag_ui.scan_window import ScanWindow
 from zdiag_ui.flash_window import FlashWindow, relativize
 from zdiag_ui.dialogs import CrcConfigWidget, CrcToolDialog, ServiceEditorDialog, SettingsDialog
 from zdiag_ui import qt as _qt
@@ -454,6 +456,138 @@ class MonitorTests(Base):
     def test_launcher_button_opens_it(self):
         L = LauncherWindow(self.ctx); L._open("monitor")
         self.assertTrue(L.windows["monitor"].isVisible()); L.windows["monitor"].close(); L.close()
+
+
+class ScanTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.ctx.scan_dir = tempfile.mkdtemp()
+        self.w = ScanWindow(self.ctx); self.addCleanup(self.w.close)
+
+    def fields(self, i):
+        return [self.w.rows[i]["fields"][k].text() for k, _ in _sw.INFO_FIELDS]
+
+    def tiles(self):
+        return [b.text() for b, _ in self.w.tile_buttons]
+
+    def patch(self, cls, name, fn):
+        old = getattr(cls, name); setattr(cls, name, fn); self.addCleanup(setattr, cls, name, old)
+
+    def test_list_shows_four_modules_with_dashes(self):
+        w = self.w
+        self.assertEqual([r["name"].text() for r in w.rows], ["动力域控制器", "驱动电机控制器", "电驱充电模块", "从驱动电机控制器"])
+        self.assertTrue(all(self.fields(i) == ["-"] * 4 for i in range(4)))
+        self.assertEqual((w.b_start.text(), w.b_stop.text(), w.b_stop.isEnabled()), ("开始扫描", "停止扫描", False))
+
+    def test_scan_selected_only(self):
+        w = self.w
+        w.rows[1]["chk"].setChecked(False); w.rows[2]["chk"].setChecked(False)
+        w.b_start.click()
+        self.assertTrue(all(v != "-" for v in self.fields(0)) and all(v != "-" for v in self.fields(3)))
+        self.assertEqual((self.fields(1), self.fields(2)), (["-"] * 4, ["-"] * 4))      # not selected: untouched
+        self.assertEqual(w.l_status.text(), "扫描完成"); self.assertEqual(self.ctx.dev.owners, {})
+        self.assertEqual(w.rows[0]["fields"]["dtc"].text(), "00 02")
+        w.rows[0]["chk"].setChecked(False); w.k_all.setChecked(True); w._select_all()
+        self.assertTrue(all(r["chk"].isChecked() for r in w.rows))
+
+    def test_scan_needs_started_channel_and_selection(self):
+        self.ctx.dev.stop_channel(0); self.w.b_start.click()
+        self.assertTrue(msgs("warn")); W.QMessageBox.calls.clear()
+        self.ctx.dev.start_channel(0, ChannelCfg(), self.ctx.diag_cfg.addr, "new")
+        for r in self.w.rows: r["chk"].setChecked(False)
+        self.w.b_start.click(); self.assertTrue(msgs("info"))
+
+    def test_edit_address_dialog(self):
+        w = self.w
+        def fake(d):
+            d.e_phys.setText("7e4"); d._follow(); d.btn_ok.click(); return 1
+        self.patch(_sw.ModuleAddrDialog, "exec_", fake)
+        w.rows[0]["name"].click()
+        m = w.store.modules()[0]
+        self.assertEqual((m.phys, m.resp_id, m.func), (0x7E4, 0x7EC, 0x7DF))
+        w.b_start.click(); self.assertEqual(w.rows[0]["fields"]["code"].text() != "-", True)   # scan uses the new address
+        def fake2(d):
+            d.e_phys.setText("7e5"); d.e_resp.setText("7f0"); d._manual(); d._follow(); d.btn_ok.click(); return 1
+        self.patch(_sw.ModuleAddrDialog, "exec_", fake2)
+        w.rows[0]["name"].click(); m = w.store.modules()[0]
+        self.assertEqual((m.phys, m.resp_id), (0x7E5, 0x7F0))
+        def bad(d):
+            d.e_phys.setText("zz"); d.btn_ok.click(); return 0
+        self.patch(_sw.ModuleAddrDialog, "exec_", bad); W.QMessageBox.calls.clear()
+        w.rows[0]["name"].click(); self.assertTrue(msgs("warn")); self.assertEqual(w.store.modules()[0].phys, 0x7E5)
+
+    def test_edit_info_executor_in_page_and_scan_uses_it(self):
+        w = self.w
+        w.rows[0]["fields"]["code"].click()
+        self.assertEqual(w.stack.currentIndex(), _sw.EDITOR)
+        self.assertEqual([s["pdu"] for s in w.editor.executor.steps], ["10 03", "22 F1 88"])
+        self.assertFalse(w.editor.e_name.isEnabled())
+        w.editor.executor.steps[-1]["pdu"] = "22 F1 90"; w.editor.on_changed()          # the VIN example from the spec
+        w.editor.run()                                                                   # 试运行
+        self.assertEqual(w.editor.panel.l_result.text(), "4C 53 56 41 42 31 32 33 34 35 43 30 30 30 30 30 31")
+        self.assertTrue(any("22 F1 90" in l for l in w.editor.panel.log.toPlainText().split("\n")))
+        self.assertTrue(w.editor.save()); self.assertEqual(w.editor.panel.l_result.text(), "已保存")
+        w._editor_back(); self.assertEqual(w.stack.currentIndex(), _sw.LIST)
+        w.b_start.click()
+        self.assertEqual(bytes.fromhex(self.fields(0)[0]), b"LSVAB12345C000001")
+        # result settings: choose step + skip
+        w.rows[0]["fields"]["code"].click(); w.editor.e_skip.setText("5"); self.assertTrue(w.editor.save())
+        self.assertEqual(w.store.load_info(w.modules[0], "code").result["skip"], 5)
+        w.editor.e_skip.setText("x"); W.QMessageBox.calls.clear(); self.assertIsNone(w.editor.current()); self.assertTrue(msgs("warn"))
+
+    def test_module_page_functions_run_and_navigation(self):
+        w = self.w
+        w.rows[0]["next"].click()
+        self.assertEqual(w.stack.currentIndex(), _sw.MODULE); self.assertEqual(self.tiles(), ["故障检测", "清除故障"])
+        self.assertEqual(w.l_path.text(), "动力域控制器 › 功能")
+        w.tile_buttons[0][0].click()                                                     # 故障检测
+        self.assertEqual(w.mpanel.l_result.text(), "01 23 45 08 01 23 45 08")
+        w.tile_buttons[1][0].click(); self.assertEqual(w.mpanel.l_result.text(), "完成（无数据）")
+        w.tile_buttons[0][0].click(); self.assertEqual(w.mpanel.l_result.text(), "完成（无数据）")   # list is empty now
+        self.assertTrue("REQ" in w.mpanel.log.toPlainText())
+        w.b_up.click(); self.assertEqual(w.stack.currentIndex(), _sw.LIST)
+
+    def test_add_function_folder_hierarchy_like_folders(self):
+        from zdiag.project import new_step
+        w = self.w; w.rows[0]["next"].click()
+        W.QInputDialog.next_text = ("标定", True); w.b_addfolder.click()
+        self.assertEqual(self.tiles(), ["▣ 标定", "故障检测", "清除故障"])
+        w.tile_buttons[0][0].click()                                                     # enter the folder
+        self.assertEqual((w.l_path.text(), self.tiles()), ("动力域控制器 › 功能 › 标定", []))
+        w.b_addfn.click(); self.assertEqual(w.stack.currentIndex(), _sw.EDITOR)
+        w.editor.e_name.setText("读VIN"); w.editor.host.project.steps.append(new_step("service", name="读VIN", pdu="22 F1 90"))
+        w.editor.on_changed(); self.assertTrue(w.editor.save())
+        self.assertTrue(os.path.isfile(os.path.join(self.ctx.scan_dir, "动力域控制器", "功能", "标定", "读VIN.json")))
+        w._editor_back(); self.assertEqual((w.stack.currentIndex(), self.tiles()), (_sw.MODULE, ["读VIN"]))
+        w.tile_buttons[0][0].click()
+        self.assertEqual(w.mpanel.l_result.text(), "4C 53 56 41 42 31 32 33 34 35 43 30 30 30 30 30 31")
+        w.b_up.click(); self.assertEqual(w.l_path.text(), "动力域控制器 › 功能")             # one level up
+        w.b_up.click(); self.assertEqual(w.stack.currentIndex(), _sw.LIST)
+        W.QMessageBox.calls.clear(); w.rows[0]["next"].click(); W.QInputDialog.next_text = ("标定", True); w.b_addfolder.click()
+        self.assertTrue(msgs("warn"))                                                    # duplicate name
+
+    def test_manage_mode_rename_edit_delete(self):
+        w = self.w; w.rows[0]["next"].click(); w.b_manage.setChecked(True); w.b_manage.click() if False else w._toggle_manage()
+        pick = {"c": "rename"}
+        def fake(d):
+            d.choice = pick["c"]; return 1
+        self.patch(_sw.ChoiceDialog, "exec_", fake)
+        W.QInputDialog.next_text = ("DTC读取", True); w.tile_buttons[0][0].click()
+        self.assertEqual(self.tiles(), ["DTC读取", "清除故障"])
+        self.assertEqual(w.store.list_entries(w.cur_dir)[0].name, "DTC读取")
+        pick["c"] = "edit"; w.tile_buttons[0][0].click()
+        self.assertEqual((w.stack.currentIndex(), w.editor.e_name.text()), (_sw.EDITOR, "DTC读取"))
+        w.editor.e_name.setText("故障码"); w.editor.on_changed(); self.assertTrue(w.editor.save())      # rename via the editor
+        w._editor_back(); self.assertEqual(self.tiles(), ["故障码", "清除故障"])
+        pick["c"] = "delete"; W.QMessageBox.next_answer = W.QMessageBox.No; w.tile_buttons[0][0].click()
+        self.assertEqual(len(self.tiles()), 2)
+        W.QMessageBox.next_answer = W.QMessageBox.Yes; w.tile_buttons[0][0].click(); self.assertEqual(self.tiles(), ["清除故障"])
+        w.b_manage.setChecked(False); w._toggle_manage(); w.tile_buttons[0][0].click()          # normal mode runs it again
+        self.assertEqual(w.mpanel.l_result.text(), "完成（无数据）")
+
+    def test_launcher_opens_scan_window(self):
+        L = LauncherWindow(self.ctx); L._open("scan")
+        self.assertTrue(L.windows["scan"].isVisible()); L.windows["scan"].close(); L.close()
 
 
 class FlashTests(Base):

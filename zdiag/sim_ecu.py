@@ -14,7 +14,7 @@ class SimEcu:
     def __init__(self, bus: Bus, req_id=0x7E0, rsp_id=0x7E8, max_block=258,
                  chatter=True, erase_pending=2, key_fn=None,
                  serial=b"SN2024ABCD0001", seed_len=4, crc_rids=(), padding=0xAA, erase_rids=(),
-                 seg_crc_rids=(), file_crc_rids=()) -> None:
+                 seg_crc_rids=(), file_crc_rids=(), dids=None, dtcs=()) -> None:
         # the ECU receives on req_id, transmits on rsp_id; asks tester for BS=8 / STmin=1ms
         self.tp = IsoTp(bus, tx_id=rsp_id, rx_id=req_id, block_size=8, st_min=1, padding=padding)
         self.bus, self.rsp_id, self.max_block = bus, rsp_id, max_block
@@ -34,6 +34,8 @@ class SimEcu:
         self.file_crc = 0              # CRC32 of everything downloaded since the last erase (全文件CRC)
         self.erase_requests = []       # raw erase PDUs, for format checks
         self.tester_present_count = 0
+        self.dids: Dict[int, bytes] = dict(dids or {})        # extra readable DIDs (software code/version/date ...)
+        self.dtcs = [bytes(d) for d in dtcs]                   # stored DTCs: 3-byte code + status byte each
         self._stop = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
@@ -47,7 +49,7 @@ class SimEcu:
         if self.chatter:
             self.bus.send(CanFrame(0x123, bytes(8)))
             self.bus.send(CanFrame(0x7E9, b"\x03\x62\xF1\x90\xAA\xAA\xAA\xAA"))           # other ECU
-            self.bus.send(CanFrame(self.rsp_id, b"\x03\x7F\x19\x31\xAA\xAA\xAA\xAA"))      # stale NRC of an earlier, different request
+            self.bus.send(CanFrame(self.rsp_id, b"\x03\x7F\x2F\x31\xAA\xAA\xAA\xAA"))      # stale NRC of an earlier, different request
 
     def _run(self):
         while not self._stop.is_set():
@@ -81,7 +83,9 @@ class SimEcu:
                 self._reply(b"\x7E" + bytes([sub & 0x7F]))
         elif sid == 0x22:
             did = int.from_bytes(m[1:3], "big")
-            if did == 0xF190:
+            if did in self.dids:
+                self._reply(b"\x62" + m[1:3] + self.dids[did])
+            elif did == 0xF190:
                 self._reply(b"\x62\xF1\x90" + b"LSVAB12345C000001")
             elif did == 0xF18C:
                 self._reply(b"\x62\xF1\x8C" + self.serial)
@@ -89,6 +93,18 @@ class SimEcu:
                 self._reply(b"\x62\xF1\xA0" + bytes(range(100)))         # long multi-frame
             else:
                 self._nrc(sid, 0x31)
+        elif sid == 0x19:
+            if sub == 0x01:
+                n = sum(1 for d in self.dtcs if d[3] & (m[2] if len(m) > 2 else 0xFF))
+                self._reply(b"\x59\x01\xFF\x01" + n.to_bytes(2, "big"))
+            elif sub == 0x02:
+                mask = m[2] if len(m) > 2 else 0xFF
+                self._reply(b"\x59\x02\xFF" + b"".join(d for d in self.dtcs if d[3] & mask))
+            else:
+                self._nrc(sid, 0x12)
+        elif sid == 0x14:
+            self.dtcs = []
+            self._reply(b"\x54")
         elif sid == 0x2E:
             self._reply(b"\x6E" + m[1:3])
         elif sid == 0x27:
@@ -199,5 +215,9 @@ def make_sim(addr, profile: str = "new", **kw):
     a, b = VirtualBus.pair()
     prof = dict(seed_len=16, erase_rids=(0xFF00,), seg_crc_rids=(0x0102,), file_crc_rids=(0x0103,)) if profile == "new" else \
         dict(seed_len=2, erase_rids=(0xDFFF,), seg_crc_rids=(0xDFFE,), file_crc_rids=(0xDFFD,))
+    n = addr.phys & 0xFFF                                              # each simulated software has its own identity
+    prof.update(dids={0xF188: f"SW{n:03X}0001".encode(), 0xF189: b"V1.0" + bytes([0x30 + n % 10]),
+                      0xF199: bytes([0x20, 0x26, 0x10, 0x00 + (n % 28) + 1])},
+                dtcs=[bytes([0x01, 0x23, 0x45, 0x08])] * (n % 4))
     prof.update(kw)
     return a, SimEcu(b, req_id=addr.phys, rsp_id=addr.resp, **prof)

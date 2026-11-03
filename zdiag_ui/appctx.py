@@ -28,6 +28,7 @@ class AppContext:
         self.devsel = {"device": SIM_DEVICE, "index": 0}
         self.chan_cfgs = {}
         self.last_dir = self.dir
+        self.scan_dir = os.path.join(self.dir, "scan_data")      # 软件扫描: modules + executors (folder tree)
         self.services = services_def.load_services(self.services_path)
         self.dev = DeviceManager(self.dir, lambda: self.channel.zlgcan_dll)
         self.load()
@@ -51,9 +52,11 @@ class AppContext:
             except ValueError:
                 pass
         self.last_dir = d.get("last_dir", self.last_dir)
+        if isinstance(d.get("scan_dir"), str) and d["scan_dir"]:
+            self.scan_dir = d["scan_dir"]
 
     def save(self) -> None:
-        d = {"diag": self.diag_cfg.to_dict(), "channel": asdict(self.channel), "last_dir": self.last_dir,
+        d = {"diag": self.diag_cfg.to_dict(), "channel": asdict(self.channel), "last_dir": self.last_dir, "scan_dir": self.scan_dir,
              "devsel": self.devsel, "chan_cfgs": {str(k): asdict(v) for k, v in self.chan_cfgs.items()}}
         try:
             with open(self.cfg_path, "w", encoding="utf-8") as f:

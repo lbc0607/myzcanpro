@@ -552,6 +552,10 @@ class QMessageBox(QWidget):
 
 class QInputDialog(QWidget):
     next_int = None
+    next_text = ("", True)
+    @staticmethod
+    def getText(parent, title, label, *a, **k):
+        return QInputDialog.next_text
     @staticmethod
     def getInt(parent, title, label, value=0, *a, **k):
         return (QInputDialog.next_int if QInputDialog.next_int is not None else value, True)

@@ -175,6 +175,8 @@ class DiagSession:
         self._plan: Optional[List[dict]] = None       # the plan being run (None for a single run_step)
         self._idx = -1
         self._seg_done: set = set()                   # indexes of CRC steps whose per-segment checks already ran
+        self.replies: Dict[int, bytes] = {}           # step index -> data of its (positive) service reply, for result extraction
+        self.last_error = ""                          # why the last run_plan failed
 
     # -- logging
     def log(self, kind: str, text: str, can_id=None, direction: str = "", data: bytes = b"") -> None:
@@ -261,6 +263,8 @@ class DiagSession:
     def _step_service(self, s: dict) -> str:
         pdu = parse_hex(s["pdu"])
         r = self.exchange(pdu, s.get("addr", "phys"), s.get("suppress", False))
+        if r.ok:
+            self.replies[self._idx] = bytes(r.data)
         if s.get("check", True):
             ok, why = match_expect(self._expect(s.get("expect", ""), pdu), r,
                                    self.cfg.settings.any_negative,
@@ -501,6 +505,7 @@ class DiagSession:
     def run_plan(self, steps: List[dict], repeat: int = 1, interval_s: float = 0.0) -> bool:
         """Run all steps `repeat` times. Returns True if every step passed."""
         self.apply_keepalive()
+        self.replies, self.last_error = {}, ""
         try:
             for n in range(repeat):
                 if repeat > 1:
@@ -519,6 +524,7 @@ class DiagSession:
                         self.hooks.step(i, "fail", "已取消")
                         raise
                     except StepError as e:
+                        self.last_error = f"步骤 {i + 1} {step.get('name', '')}: {e}"
                         self.log("ERR", f"步骤 {i + 1} 失败: {e}")
                         self.hooks.step(i, "fail", str(e))
                         return False

@@ -73,7 +73,8 @@ class FlashEditorTab(W.QWidget):
         for e in (self.e_phys, self.e_func, self.e_resp):
             e.setFixedWidth(84)
         self.b_more, self.b_svc, self.b_crc = W.QPushButton("更多设置"), W.QPushButton("服务编辑器"), W.QPushButton("校验码工具")
-        for wd in (W.QLabel("地址:"), self.e_phys, self.e_func, self.e_resp,
+        self.l_addr = W.QLabel("地址:")
+        for wd in (self.l_addr, self.e_phys, self.e_func, self.e_resp,
                    self.b_more, self.b_svc, self.b_crc):
             h.addWidget(wd)
         v.addWidget(bar)
@@ -126,6 +127,13 @@ class FlashEditorTab(W.QWidget):
         self.b_delay.clicked.connect(self._add_delay)
         self.table.currentCellChanged.connect(self._on_select)
         self.table.itemChanged.connect(self._on_item_changed)
+
+    def embed(self, apply_text: str = "试运行") -> None:
+        """Used by the 软件扫描 executor editor: addresses come from the module, files/settings are not needed."""
+        for w in (self.b_new, self.b_open, self.b_export, self.b_more, self.b_crc, self.l_addr,
+                  self.e_phys, self.e_func, self.e_resp):
+            w.hide()
+        self.b_apply.setText(apply_text)
 
     # -- forms
     def rebuild_forms(self) -> None:
