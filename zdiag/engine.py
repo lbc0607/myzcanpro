@@ -164,7 +164,7 @@ class DiagSession:
             padding=st.padding if st.padding_enabled else None,
             n_bs=st.fc_timeout_ms / 1000.0, n_cr=max(st.fc_timeout_ms / 1000.0, 1.0),
             stmin_override=(st.override_stmin_ms / 1000.0) if st.override_stmin else None,
-            auto_fc=st.auto_fc)
+            auto_fc=st.auto_fc, brs=st.fd_brs)
         self.uds = UdsClient(self.tp, p2=st.p2_ms / 1000.0, p2_star=st.p2star_ms / 1000.0)
         self.uds.auto_keepalive = False
         self.uds.suppress_wait = st.suppress_wait

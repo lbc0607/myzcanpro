@@ -88,6 +88,7 @@ class SettingsDialog(W.QDialog):
         self.a_ovr_on, self.a_ovr = W.QCheckBox("替换远端STmin(ms):"), W.QLineEdit()
         self.a_retry, self.a_interval, self.a_fc = W.QLineEdit(), W.QLineEdit(), W.QLineEdit()
         self.a_supwait, self.a_anyneg = W.QCheckBox("抑制响应等待"), W.QCheckBox("判断任意消极响应")
+        self.a_brs = W.QCheckBox("CAN FD 诊断帧使用 BRS(位速率切换)")
         rows = [
             (W.QLabel("传输协议:"), self.a_proto, self.a_pad_on, self.a_pad),
             (W.QLabel("接收方填充字节(0x):"), self.a_rxpad, W.QLabel("(ECU回复所用，仅模拟ECU生效)"), None),
@@ -96,6 +97,7 @@ class SettingsDialog(W.QDialog):
             (self.a_ovr_on, self.a_ovr, W.QLabel("下载文件重试次数:"), self.a_retry),
             (W.QLabel("文件下载$36间隔(ms):"), self.a_interval, W.QLabel("流控超时(ms):"), self.a_fc),
             (self.a_supwait, None, self.a_anyneg, None),
+            (self.a_brs, None, None, None),
         ]
         for r, row in enumerate(rows):
             for c, wd in enumerate(row):
@@ -182,6 +184,7 @@ class SettingsDialog(W.QDialog):
         self.a_fc.setText(str(s.fc_timeout_ms))
         self.a_supwait.setChecked(s.suppress_wait)
         self.a_anyneg.setChecked(s.any_negative)
+        self.a_brs.setChecked(s.fd_brs)
         self.o_max.setText(str(s.max_log_lines))
         self.o_save.setText(str(s.save_max_lines))
         self.o_raw.setChecked(s.show_raw)
@@ -250,6 +253,7 @@ class SettingsDialog(W.QDialog):
         s.protocol = self.a_proto.currentText()
         s.padding_enabled, s.padding = self.a_pad_on.isChecked(), pad
         s.override_stmin = self.a_ovr_on.isChecked()
+        s.fd_brs = self.a_brs.isChecked()
         s.suppress_wait, s.any_negative, s.show_raw = (self.a_supwait.isChecked(),
                                                        self.a_anyneg.isChecked(), self.o_raw.isChecked())
         for k_, v_ in vals.items():

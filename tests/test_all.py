@@ -1,4 +1,4 @@
-import logging, os, sys, time, unittest, zlib
+import logging, os, sys, threading, time, unittest, zlib
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from zdiag.bus import VirtualBus, CanFrame
 from zdiag.isotp import IsoTp, IsoTpTimeout, IsoTpError
@@ -161,6 +161,35 @@ class FlashTests(unittest.TestCase):
             self.assertEqual(ecu.reset_count, 0)         # must not reset after a failed verify
         finally:
             ecu.stop()
+
+
+class FdSingleFrameFormat(unittest.TestCase):
+    """CAN FD tester: <=7 byte requests use the classic SF header (03 22 F1 90 ..), 8..62 bytes the escape header."""
+
+    def frames_for(self, payload, brs=True):
+        a, b = VirtualBus.pair()
+        IsoTp(a, 0x7E2, 0x7EA, tx_dl=64, padding=0x55, brs=brs).send(payload)
+        return b._rx.get_nowait()
+
+    def test_short_request_is_classic_sf_in_an_8_byte_fd_frame(self):
+        f = self.frames_for(bytes([0x22, 0xF1, 0x90]))
+        self.assertEqual((f.data.hex(), f.fd, f.brs), ("0322f19055555555", True, True))
+        self.assertFalse(self.frames_for(bytes([0x22, 0xF1, 0x90]), brs=False).brs)
+        self.assertEqual(self.frames_for(bytes(range(1, 8))).data.hex(), "070102030405" "0607")
+
+    def test_longer_single_frames_use_escape_header(self):
+        f = self.frames_for(bytes(range(10)))
+        self.assertEqual((f.data[:2].hex(), len(f.data)), ("000a", 12))
+        f = self.frames_for(bytes(62))
+        self.assertEqual((f.data[:2].hex(), len(f.data)), ("003e", 64))
+
+    def test_fd_roundtrip_still_works_both_ways(self):
+        a, b = VirtualBus.pair()
+        t1, t2 = IsoTp(a, 1, 2, tx_dl=64), IsoTp(b, 2, 1, tx_dl=64)
+        for n in (1, 7, 8, 40, 62, 63, 300):
+            msg = bytes((i * 7) & 0xFF for i in range(n))
+            t1.send(msg) if n <= 62 else threading.Thread(target=t1.send, args=(msg,)).start()
+            self.assertEqual(t2.recv(2), msg)
 
 
 if __name__ == "__main__":

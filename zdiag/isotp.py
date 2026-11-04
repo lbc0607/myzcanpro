@@ -94,12 +94,15 @@ class IsoTp:
     # ------------------------------------------------------------ send
     def send(self, data: bytes) -> None:
         n, dl = len(data), self.tx_dl
-        sf_max = dl - 1 if dl <= 8 else dl - 2
         if n == 0:
             raise ValueError("empty payload")
-        if n <= sf_max:
-            hdr = bytes([n]) if dl <= 8 else bytes([0x00, n])
-            self._tx(hdr + data)
+        # ISO 15765-2:2016 single frame: payloads up to 7 bytes always use the classic header (PCI 0x0N, 8-byte frame),
+        # even on CAN FD; the escape header (00 LL) is only for 8..dl-2 bytes in a frame longer than 8 bytes.
+        if n <= 7:
+            self._tx(bytes([n]) + data)
+            return
+        if dl > 8 and n <= dl - 2:
+            self._tx(bytes([0x00, n]) + data)
             return
         hdr = bytes([0x10 | (n >> 8), n & 0xFF]) if n <= 4095 else \
             bytes([0x10, 0x00]) + n.to_bytes(4, "big")
