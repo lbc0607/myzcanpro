@@ -253,6 +253,49 @@ class LauncherTests(Base):
         w.close()
         self.assertFalse(msgs("warn"))
 
+    def test_tools_open_as_tabs_not_popups(self):
+        w = LauncherWindow(self.ctx)
+        self.assertEqual((w.tabs.count(), w.tabs.tabText(0)), (1, "设备管理"))
+        w.b_uds.click(); w.b_flash.click(); w.b_scan.click()
+        self.assertEqual([w.tabs.tabText(i) for i in range(w.tabs.count())], ["设备管理", "UDS诊断", "ECU刷新", "软件扫描"])
+        self.assertIs(w.tabs.widget(w.tabs.currentIndex()), w.windows["scan"])
+        w.b_uds.click()                                              # already open -> just focus its tab
+        self.assertEqual((w.tabs.count(), w.tabs.currentIndex()), (4, 1))
+        w.b_home.click(); self.assertEqual(w.tabs.currentIndex(), 0)
+        w.close()
+
+    def test_close_tab_and_veto_while_flashing(self):
+        w = LauncherWindow(self.ctx); w._open("send"); w._open("flash")
+        w.tabs.tabCloseRequested.emit(1) if False else w._close_tab_at(1)       # close the 普通发送 tab
+        self.assertEqual((w.tabs.count(), list(w.windows)), (2, ["flash"]))
+        w._close_tab_at(0)                                                       # the device-manager tab is permanent
+        self.assertEqual(w.tabs.count(), 2)
+        fw = w.windows["flash"]
+        fw.executor.worker = type("R", (), {"isRunning": lambda s: True})()        # pretend a flash is running
+        self.assertFalse(w.close_tool("flash")); self.assertIn("flash", w.windows); self.assertEqual(w.tabs.count(), 2)
+        W.QMessageBox.calls.clear(); ev = type("E", (), {"ignored": False, "ignore": lambda s: setattr(s, "ignored", True),
+                                                          "accept": lambda s: None})()
+        w.closeEvent(ev); self.assertTrue(ev.ignored)                            # main window refuses to close, too
+        fw.executor.worker = None
+        w.close(); self.assertEqual(w.windows, {})
+
+    def test_float_and_dock_back(self):
+        w = LauncherWindow(self.ctx); w._open("monitor"); w._open("send")
+        mon = w.windows["monitor"]
+        w._float_at(1)                                               # double-click / 浮动 on the 报文监视 tab
+        self.assertIn("monitor", w.floating); self.assertEqual([w.tabs.tabText(i) for i in range(w.tabs.count())], ["设备管理", "普通发送"])
+        self.assertTrue(mon.isVisible()); self.assertEqual(w._key_of_tab(1), "send")
+        w._open("monitor"); self.assertEqual(w.tabs.count(), 2)       # focusing a floating tool does not create a tab
+        w._float_at(0)                                               # the home tab cannot float
+        self.assertEqual(list(w.floating), ["monitor"])
+        w.dock_tool("monitor")
+        self.assertEqual(([w.tabs.tabText(i) for i in range(w.tabs.count())], w.floating), (["设备管理", "普通发送", "报文监视"], {}))
+        self.assertIs(w.windows["monitor"], mon); self.assertEqual(w.tabs.currentIndex(), 2)
+        w.float_tool("send"); w.close_tool("send")                   # closing a floating tool removes it
+        self.assertNotIn("send", w.windows); self.assertEqual(w.floating, {})
+        w.float_tool("monitor"); w.close()                           # main window closes floating tools as well
+        self.assertEqual((w.windows, w.floating), ({}, {}))
+
 
 class DiagWindowTests(Base):
     def setUp(self):
@@ -455,7 +498,7 @@ class MonitorTests(Base):
 
     def test_launcher_button_opens_it(self):
         L = LauncherWindow(self.ctx); L._open("monitor")
-        self.assertTrue(L.windows["monitor"].isVisible()); L.windows["monitor"].close(); L.close()
+        self.assertTrue(L.windows["monitor"].isVisible()); L.close_tool("monitor"); L.close()
 
 
 class ScanTests(Base):
@@ -587,7 +630,7 @@ class ScanTests(Base):
 
     def test_launcher_opens_scan_window(self):
         L = LauncherWindow(self.ctx); L._open("scan")
-        self.assertTrue(L.windows["scan"].isVisible()); L.windows["scan"].close(); L.close()
+        self.assertTrue(L.windows["scan"].isVisible()); L.close_tool("scan"); L.close()
 
 
 class FlashTests(Base):

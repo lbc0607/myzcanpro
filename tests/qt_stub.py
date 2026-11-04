@@ -108,11 +108,14 @@ class QObject(metaclass=_Meta):
     def show(self): self._visible = True
     def hide(self): self._visible = False
     def close(self):
-        self._visible = False
         ce = _FakeEvent()
         if hasattr(self, "closeEvent"):
             self.closeEvent(ce)
-        return True
+        ok = ce.accepted is not False                  # a closeEvent that calls ignore() vetoes the close
+        if ok:
+            self._visible = False
+        return ok
+    def setParent(self, p, *a): self._parent = p
     def parent(self): return self._parent
     def setObjectName(self, n): self._props["objectName"] = n
     def setProperty(self, k, v): self._props[k] = v
@@ -327,7 +330,12 @@ class QTabWidget(QWidget):
     def widget(self, i): return self._tabs[i][0]
     def removeTab(self, i):
         del self._tabs[i]
-        self._cur = min(self._cur, len(self._tabs) - 1)
+        self._cur = max(min(self._cur, len(self._tabs) - 1), 0)
+    def indexOf(self, w):
+        for i, t in enumerate(self._tabs):
+            if t[0] is w:
+                return i
+        return -1
 
 
 class QStackedWidget(QWidget):
@@ -598,6 +606,7 @@ class _QtNS(metaclass=_Meta):
     Horizontal, Vertical = 1, 2
     AlignLeft, AlignRight, AlignVCenter, AlignCenter = 1, 2, 128, 132
     DisplayRole, ForegroundRole, BackgroundRole = 0, 9, 8
+    Window, Widget, BottomRightCorner = 1, 0, 3
 
 
 def _make_module(name, explicit):

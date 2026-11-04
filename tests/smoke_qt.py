@@ -88,8 +88,11 @@ def main() -> int:
     cd.show()
     check("channel dialog builds (FD)", cd.c_dbaud.isEnabled())
     cd.close()
+    check("tools are tabs", L.tabs.count() == 7)
+    L.float_tool("monitor"); L.dock_tool("monitor")        # undock / dock round trip with the real Qt
+    check("monitor docked again", "monitor" not in L.floating and L.tabs.indexOf(L.windows["monitor"]) >= 0)
     for key in ("uds", "flash", "send", "scan"):          # a channel serves one window at a time: close them again
-        L.windows[key].close()
+        L.close_tool(key)
     check("no window keeps the channel", ctx.dev.owners == {})
     # --- 报文监视 stays open (and records) while everything below runs
     mon = L.windows["monitor"]
@@ -108,14 +111,14 @@ def main() -> int:
     t.b_list.click()
     pump(lambda: not t.running(), 10)
     check("list send finished", not t.running())
-    L.windows["send"].close()
+    L.close_tool("send")
     check("send window released the channel", pump(lambda: ctx.dev.owners == {}, 5))   # release runs in the GUI thread
     # --- UDS诊断
     L._open("uds")
     dw = L.windows["uds"]
     dw.e_pdu.setText("22 F1 90"); dw.b_now.click()
     check("uds 22 F190 answered", pump(lambda: any(e.kind == "RSP" and e.data[:3] == bytes([0x62, 0xF1, 0x90]) for e in dw.events)))
-    dw.close()
+    L.close_tool("uds")
     pump(lambda: ctx.dev.owners == {}, 5)
     # --- 软件扫描: scan 4 software modules, open a module's functions, run one
     ctx.scan_dir = tempfile.mkdtemp()
@@ -132,7 +135,7 @@ def main() -> int:
     check("function runs", pump(lambda: sw.mpanel.l_result.text() not in ("", "运行中…"), 30) and "失败" not in sw.mpanel.l_result.text())
     pump(lambda: ctx.dev.owners == {}, 5)
     sw.rows and sw.b_up.click()
-    sw.close()
+    L.close_tool("scan")
     pump(lambda: ctx.dev.owners == {}, 5)
     # --- ECU刷新 (two-segment HEX, erase + segment/whole-file CRC)
     L._open("flash")
@@ -171,8 +174,8 @@ def main() -> int:
     L.refresh_stats(); pump(timeout=0.6); L.refresh_stats()
     check("launcher shows counters", L.panels[0].l_tx.text() != "发送: 0")
     # --- shutdown
-    for w in list(L.windows.values()):
-        w.close()
+    for k in list(L.windows):
+        L.close_tool(k)
     for p_ in L.panels:
         if p_.b_toggle.text() == "停止":
             p_.b_toggle.click()

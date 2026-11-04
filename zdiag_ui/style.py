@@ -14,6 +14,12 @@ QComboBox::drop-down { border-left: 1px solid #9BB0CE; width: 22px; }
 QTabWidget::pane { border: none; border-top: 1px solid #9BB0CE; }
 QTabBar::tab { padding: 5px 14px; background: white; border: 1px solid #9BB0CE; border-bottom: none; margin-right: 1px; }
 QTabBar::tab:selected { background: #4A7FBF; color: white; }
+QTabBar::tab:bottom { border: 1px solid #9BB0CE; border-top: none; margin-top: 0; }
+QFrame#menubar { background: #263A56; }
+QFrame#menubar QPushButton { background: transparent; color: white; border: none; border-radius: 0; padding: 6px 18px; min-height: 34px; font-size: 11pt; }
+QFrame#menubar QPushButton:hover { background: #35507A; }
+QFrame#menubar QPushButton:pressed { background: #4A7FBF; }
+QLabel#brand { color: white; font-size: 13pt; font-weight: bold; padding-right: 22px; }
 QHeaderView::section { background: #DCE4EE; border: none; padding: 5px 6px; }
 QTableWidget, QTreeWidget, QListWidget, QPlainTextEdit { border: 1px solid #9BB0CE; background: white; }
 QTableWidget { gridline-color: #E4E9F0; selection-background-color: #B6CDEE; selection-color: black; }
