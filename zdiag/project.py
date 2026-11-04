@@ -102,6 +102,9 @@ class Settings:
     save_max_lines: int = 100000
     show_raw: bool = False
     auto_fc: bool = True
+    serial_did: str = "F1 8C"       # DID read (22) for the ECU serial number written to EcuSerialNum.txt line 1
+    serial_file: str = "EcuSerialNum.txt"
+    serial_format: str = "ascii"  # how the serial number is written: ascii | hex
     fd_brs: bool = True           # CAN FD diagnostic frames carry BRS (bit-rate switch); irrelevant when both rates are equal
 
 
@@ -119,7 +122,7 @@ class DiagConfig:
     keepalive: KeepAlive = field(default_factory=KeepAlive)
     settings: Settings = field(default_factory=Settings)
     serial_id_map: Dict[str, List[int]] = field(
-        default_factory=lambda: {"7e2": [0, 0], "7e3": [1, 3], "7e8": [2, 4]})
+        default_factory=lambda: {"7e2": [0, 0], "7e3": [1, 2], "785": [2, 4], "645": [1, 3]})
 
     def to_dict(self) -> dict:
         return {"addr": self.addr.to_dict(), "keepalive": asdict(self.keepalive),
@@ -146,7 +149,7 @@ STEP_TYPES = ("service", "delay", "unlock", "driver", "download", "routine")
 _STEP_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "service": {"name": "", "addr": "phys", "pdu": "", "suppress": False, "check": True, "expect": ""},
     "delay": {"name": "延时", "ms": 1000},
-    "unlock": {"name": "ECU解锁", "level": 1, "dll": "", "workdir": "", "use_serial": False},
+    "unlock": {"name": "ECU解锁", "level": 1, "dll": "", "workdir": ""},
     "driver": {"name": "Flash driver", "file": "", "base_addr": "0", "addr_len": 4, "size_len": 4, "dfi": "00"},
     "download": {"name": "文件下载", "file": "", "base_addr": "0", "addr_len": 4, "size_len": 4, "dfi": "00"},
     # rkind: "custom"/"query" = generic 31 request (placeholders {addr} {len} {crc}); "erase" = 擦除内存;

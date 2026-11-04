@@ -406,15 +406,16 @@ class DiagWindowTests(Base):
         d = SettingsDialog(self.ctx, cfg, ch)
         self.assertEqual(d.e_phys.text(), "7e2"); self.assertEqual(d.a_p2.text(), "800")
         d.a_p2.setText("1234"); d.a_pad_on.setChecked(False); d.k_on.setChecked(True); d.k_period.setText("500")
-        d.a_rxpad.setText("cc"); d.s_map.setText("7e2:5,6; 7e8:2,4"); d.ch_fddl.setCurrentText("32"); d.ch_sim.setCurrentIndex(1)
+        d.a_rxpad.setText("cc"); d.t_map.setRowCount(0); d._map_row("7e2","5","6"); d._map_row("7e8","2","4"); d._map_row("", "", "")
+        d.e_sdid.setText("f1 90"); d.e_sfile.setText("Sn.txt"); d.c_sfmt.setCurrentIndex(1); d.ch_fddl.setCurrentText("32"); d.ch_sim.setCurrentIndex(1)
         d.btn_ok.click()
         self.assertEqual((cfg.settings.p2_ms, cfg.settings.padding_enabled, cfg.keepalive.period_ms), (1234, False, 500))
-        self.assertEqual((cfg.settings.rx_padding, cfg.settings.padding), (0xCC, 0x55)); self.assertEqual(cfg.serial_id_map["7e2"], [5, 6]); self.assertEqual((ch.fd_dl, ch.sim_profile), (32, "old"))
+        self.assertEqual((cfg.settings.rx_padding, cfg.settings.padding), (0xCC, 0x55)); self.assertEqual(cfg.serial_id_map, {"7e2": [5, 6], "7e8": [2, 4]}); self.assertEqual((cfg.settings.serial_did, cfg.settings.serial_file, cfg.settings.serial_format), ("F1 90", "Sn.txt", "hex")); self.assertEqual((ch.fd_dl, ch.sim_profile), (32, "old"))
         d2 = SettingsDialog(self.ctx, cfg, ch)
         d2.a_p2.setText("abc"); d2.e_phys.setText("1fff")
         W.QMessageBox.calls.clear(); d2.btn_ok.click()
         self.assertTrue(msgs("warn")); self.assertEqual(cfg.settings.p2_ms, 1234)       # nothing half-applied
-        d3 = SettingsDialog(self.ctx, cfg, ch); d3.e_phys.setText("7e5"); d3.s_map.setText("bad")
+        d3 = SettingsDialog(self.ctx, cfg, ch); d3.e_phys.setText("7e5"); d3._map_row("zz","1","1")
         d3.btn_ok.click(); self.assertEqual(cfg.addr.phys, 0x7E2)
 
     def test_keepalive_runs_with_session(self):

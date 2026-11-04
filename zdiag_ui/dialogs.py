@@ -144,12 +144,62 @@ class SettingsDialog(W.QDialog):
     def _security_tab(self):
         w = W.QWidget()
         v = W.QVBoxLayout(w)
-        v.addWidget(W.QLabel("ECUserialnumber.txt 第2、3行按诊断ID配置，格式  ID:行2,行3 ，用分号分隔："))
-        self.s_map = W.QLineEdit()
-        v.addWidget(self.s_map)
-        v.addWidget(W.QLabel("例: 7e2:0,0; 7e3:1,3; 7e8:2,4  （先按请求ID查找，找不到再按响应ID）"))
-        v.addStretch(1)
+        g = W.QGridLayout()
+        self.e_sdid, self.e_sfile, self.c_sfmt = W.QLineEdit(), W.QLineEdit(), W.QComboBox()
+        self.c_sfmt.addItems(["ASCII", "十六进制"])
+        g.addWidget(W.QLabel("序列号 DID(0x):"), 0, 0)
+        g.addWidget(self.e_sdid, 0, 1)
+        g.addWidget(W.QLabel("文件名(程序所在文件夹):"), 1, 0)
+        g.addWidget(self.e_sfile, 1, 1)
+        g.addWidget(W.QLabel("序列号写入格式:"), 2, 0)
+        g.addWidget(self.c_sfmt, 2, 1)
+        v.addLayout(g)
+        v.addWidget(W.QLabel("每次运行程序后，第一次安全访问前用 22 <DID> 读取序列号写入文件第1行（负响应则第1行为空），之后不再读取；\n"
+                             "每次安全访问前按「被解锁 ECU 的物理地址」把下表的编号写入第2、3行"
+                             "（DLL 按种子长度取用：2字节种子读第2行，16字节种子读第3行）。程序退出时删除该文件。"))
+        self.t_map = W.QTableWidget(0, 3)
+        self.t_map.setHorizontalHeaderLabels(["物理地址(0x)", "第2行编号(2字节种子)", "第3行编号(16字节种子)"])
+        v.addWidget(self.t_map, 1)
+        bt = W.QHBoxLayout()
+        self.b_map_add, self.b_map_del = W.QPushButton("添加"), W.QPushButton("删除选中行")
+        bt.addWidget(self.b_map_add)
+        bt.addWidget(self.b_map_del)
+        bt.addStretch(1)
+        v.addLayout(bt)
+        self.b_map_add.clicked.connect(lambda: self._map_row())
+        self.b_map_del.clicked.connect(self._map_del)
         return w
+
+    def _map_row(self, addr: str = "", a: str = "0", b: str = "0") -> None:
+        r = self.t_map.rowCount()
+        self.t_map.setRowCount(r + 1)
+        for c, t in enumerate((addr, a, b)):
+            self.t_map.setItem(r, c, W.QTableWidgetItem(t))
+        self.t_map.setCurrentCell(r, 0) if hasattr(self.t_map, "setCurrentCell") else None
+
+    def _map_del(self) -> None:
+        r = self.t_map.currentRow()
+        if 0 <= r < self.t_map.rowCount():
+            self.t_map.removeRow(r)
+
+    def _read_map(self) -> Dict[str, List[int]]:
+        out: Dict[str, List[int]] = {}
+        for r in range(self.t_map.rowCount()):
+            cells = [(self.t_map.item(r, c).text() if self.t_map.item(r, c) else "").strip() for c in range(3)]
+            if not any(cells):
+                continue
+            try:
+                ident = parse_id(cells[0])
+                a, b = int(cells[1]), int(cells[2])
+                if a < 0 or b < 0:
+                    raise ValueError
+            except ValueError:
+                raise ValueError(f"编号映射表第{r + 1}行格式错误: 物理地址应为十六进制，编号应为非负整数")
+            key = f"{ident:x}"
+            if key in out:
+                raise ValueError(f"编号映射表里物理地址 0x{ident:X} 重复")
+            out[key] = [a, b]
+        return out
 
     def _browse_dll(self):
         p = pick_file(self, self.ctx, "选择 zlgcan.dll", "DLL (*.dll);;所有文件 (*.*)")
@@ -188,27 +238,17 @@ class SettingsDialog(W.QDialog):
         self.o_max.setText(str(s.max_log_lines))
         self.o_save.setText(str(s.save_max_lines))
         self.o_raw.setChecked(s.show_raw)
-        self.s_map.setText("; ".join(f"{k_}:{v_[0]},{v_[1]}" for k_, v_ in c.serial_id_map.items()))
+        self.e_sdid.setText(s.serial_did)
+        self.e_sfile.setText(s.serial_file)
+        self.c_sfmt.setCurrentIndex(1 if s.serial_format == "hex" else 0)
+        self.t_map.setRowCount(0)
+        for k_, v_ in c.serial_id_map.items():
+            self._map_row(k_.upper(), str(v_[0]), str(v_[1]))
         if self.with_channel:
             ch = self.channel
             self.ch_fddl.setCurrentText(str(ch.fd_dl))
             self.ch_dll.setText(ch.zlgcan_dll)
             self.ch_sim.setCurrentIndex(0 if ch.sim_profile == "new" else 1)
-
-    @staticmethod
-    def parse_id_map(text: str) -> Dict[str, List[int]]:
-        out = {}
-        for part in text.replace("；", ";").split(";"):
-            part = part.strip()
-            if not part:
-                continue
-            try:
-                ident, vals = part.split(":")
-                a, b = vals.replace("，", ",").split(",")
-                out[f"{parse_id(ident):x}"] = [int(a), int(b)]
-            except ValueError:
-                raise ValueError(f"序列号文件映射格式错误: {part!r}  (应为 7e2:0,0)")
-        return out
 
     def _on_ok(self) -> None:
         try:
@@ -237,7 +277,16 @@ class SettingsDialog(W.QDialog):
             fc_timeout_ms=int_of(self.a_fc, "流控超时", 1, 60000),
             max_log_lines=int_of(self.o_max, "输出信息最大行数", 100, 100000000),
             save_max_lines=int_of(self.o_save, "实时保存单个文件的最大行数", 100, 100000000))
-        id_map = self.parse_id_map(self.s_map.text())
+        id_map = self._read_map()
+        try:
+            sdid = parse_hex(self.e_sdid.text())
+            if len(sdid) != 2:
+                raise ValueError
+        except ValueError:
+            raise ValueError("序列号 DID 应为 2 字节十六进制，例如 F1 8C")
+        sfile = self.e_sfile.text().strip()
+        if not sfile or any(ch in sfile for ch in '\\/:*?"<>|'):
+            raise ValueError("序列号文件名无效")
         chv = None
         if self.with_channel:
             chv = dict(fd_dl=int(self.ch_fddl.currentText()), zlgcan_dll=self.ch_dll.text().strip(),
@@ -254,6 +303,8 @@ class SettingsDialog(W.QDialog):
         s.padding_enabled, s.padding = self.a_pad_on.isChecked(), pad
         s.override_stmin = self.a_ovr_on.isChecked()
         s.fd_brs = self.a_brs.isChecked()
+        s.serial_did, s.serial_file = " ".join(f"{b:02X}" for b in sdid), sfile
+        s.serial_format = "hex" if self.c_sfmt.currentIndex() == 1 else "ascii"
         s.suppress_wait, s.any_negative, s.show_raw = (self.a_supwait.isChecked(),
                                                        self.a_anyneg.isChecked(), self.o_raw.isChecked())
         for k_, v_ in vals.items():

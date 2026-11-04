@@ -5,6 +5,7 @@ import time
 from zdiag.busstats import ChannelCfg
 from zdiag.devmgr import ConnError, channel_count, find_zlgcan, has_terminator, is_fd_device
 from zdiag.project import DEVICES
+from zdiag.seedkey import SERIAL_STATE
 from .appctx import AppContext
 from .common import warn
 from .qt import Qt, QtCore, QtWidgets as W
@@ -348,6 +349,7 @@ class LauncherWindow(W.QMainWindow):
                 event.ignore()
                 return
         self._clock.stop()
+        SERIAL_STATE.cleanup()                         # delete EcuSerialNum.txt again
         self.ctx.dev.shutdown()
         self.ctx.save()
         event.accept()

@@ -50,12 +50,17 @@ import sys
 import threading
 from typing import Dict, Optional, Tuple
 
-# diagnostic CAN ID -> (line 2, line 3) of ECUserialnumber.txt
+from .isotp import IsoTpError
+from .uds import NegativeResponse, UdsTimeout
+
+# physical diagnostic address -> (line 2, line 3) of EcuSerialNum.txt (software numbers; editable in the settings)
 DEFAULT_ID_MAP: Dict[int, Tuple[int, int]] = {
     0x7E2: (0, 0),
-    0x7E3: (1, 3),
-    0x7E8: (2, 4),
+    0x7E3: (1, 2),
+    0x785: (2, 4),
+    0x645: (1, 3),
 }
+SERIAL_FILE = "EcuSerialNum.txt"
 
 
 class ZlgKeyDll:
@@ -118,30 +123,71 @@ class ZlgKeyDll:
                     self._free(lib)
 
 
+class SerialState:
+    """What has been written to EcuSerialNum.txt during THIS run of the program (one process = one run).
+
+    The ECU serial number (DID F18C) is read only before the first security access of the run; later unlocks (also of
+    other ECUs) keep line 1 and only rewrite lines 2/3.  `cleanup()` deletes the files again on exit."""
+
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.done = False
+        self.text = ""
+        self.paths = set()
+
+    def forget(self) -> None:
+        with self.lock:
+            self.done, self.text = False, ""
+
+    def reset(self, directory: str = "", name: str = SERIAL_FILE) -> None:
+        """New run: forget the serial and drop a file a previous (crashed) run may have left behind."""
+        self.forget()
+        if directory:
+            self._remove(os.path.join(directory, name))
+
+    @staticmethod
+    def _remove(path: str) -> None:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+    def cleanup(self) -> None:
+        with self.lock:
+            for p in list(self.paths):
+                self._remove(p)
+            self.paths.clear()
+            self.done, self.text = False, ""
+
+
+SERIAL_STATE = SerialState()
+
+
 class SerialAwareKey:
-    """key_fn for UdsClient.security_access(): before requesting the seed it
+    """key_fn for UdsClient.security_access().  Before the seed is requested (`prepare`) it writes
 
-        1. reads DID 0xF18C (ECU serial number) with service 0x22,
-        2. writes  <workdir>/ECUserialnumber.txt :
-                line 1 = serial number
-                line 2 = id_map[diag id][0]
-                line 3 = id_map[diag id][1]
-        3. later computes the key with the DLL (which reads that file).
+        <workdir>/EcuSerialNum.txt
+            line 1: ECU serial number - read with 22 <serial_did> only before the FIRST security access of the run
+                    (a negative response gives an empty line 1); later unlocks keep it
+            line 2: software number for 2-byte seeds   } looked up by the PHYSICAL address of the ECU being
+            line 3: software number for 16-byte seeds  } unlocked (configurable table); the key DLL picks the line
 
-    The diagnostic ID is looked up as the tester's request ID first, then the ECU's response
-    ID (your table mixes 7E2/7E3 request IDs with a 7E8 response ID, so both are accepted).
-    Unknown ID -> error, never a guess.
+    and then the DLL computes the key (it reads the file itself).  Unknown physical address -> error, never a guess
+    (a wrong key would count against the ECU's attempt counter).
     """
 
-    def __init__(self, dll: ZlgKeyDll, id_map: Optional[Dict[int, Tuple[int, int]]] = None,
-                 serial_did: int = 0xF18C, serial_format: str = "ascii") -> None:
+    FILE = SERIAL_FILE
+
+    def __init__(self, dll: Optional[ZlgKeyDll], id_map: Optional[Dict[int, Tuple[int, int]]] = None,
+                 serial_did: int = 0xF18C, serial_format: str = "ascii", state: Optional[SerialState] = None,
+                 file_name: str = SERIAL_FILE) -> None:
         self.dll = dll
         self.id_map = dict(DEFAULT_ID_MAP if id_map is None else id_map)
         self.serial_did = serial_did
         self.serial_format = serial_format           # "ascii" | "hex"
+        self.state = SERIAL_STATE if state is None else state
+        self.FILE = file_name or SERIAL_FILE
         self.last_serial: Optional[str] = None
-
-    FILE = "ECUserialnumber.txt"
 
     def _format_serial(self, raw: bytes) -> str:
         if self.serial_format == "hex":
@@ -152,25 +198,40 @@ class SerialAwareKey:
                                "(use serial_format='hex' if the DLL expects hex)")
         return txt
 
-    def lines_for(self, tx_id: int, rx_id: int, serial_raw: bytes) -> str:
-        for ident in (tx_id, rx_id):
-            if ident in self.id_map:
-                a, b = self.id_map[ident]
-                break
-        else:
-            raise SeedKeyError(f"no ECUserialnumber.txt mapping for diag IDs "
-                               f"0x{tx_id:X}/0x{rx_id:X}; known: "
-                               f"{[hex(k) for k in self.id_map]}")
-        return f"{self._format_serial(serial_raw)}\n{a}\n{b}\n"
+    def numbers_for(self, phys: int) -> Tuple[int, int]:
+        if phys not in self.id_map:
+            raise SeedKeyError(f"物理地址 0x{phys:X} 没有配置 {self.FILE} 第2/3行编号，"
+                               f"请在 设置 → 安全访问 的映射表里添加（已有: {', '.join(f'{k:X}' for k in self.id_map)}）")
+        return self.id_map[phys]
+
+    def _read_serial(self, uds):
+        """(text, done): NRC -> ('', True); no answer -> ('', False) so that the next unlock tries again."""
+        try:
+            return self._format_serial(uds.read_did(self.serial_did)), True
+        except NegativeResponse:
+            return "", True
+        except (UdsTimeout, IsoTpError):
+            return "", False
+
+    def lines_for(self, phys: int, serial_text: str) -> str:
+        a, b = self.numbers_for(phys)
+        return f"{serial_text}\n{a}\n{b}\n"
 
     def prepare(self, uds) -> None:
-        raw = uds.read_did(self.serial_did)
-        content = self.lines_for(uds.tp.tx_id, uds.tp.rx_id, raw)
-        os.makedirs(self.dll.workdir, exist_ok=True)
-        with open(os.path.join(self.dll.workdir, self.FILE), "w", newline="\n",
-                  encoding="ascii") as f:
-            f.write(content)
-        self.last_serial = content.split("\n", 1)[0]
+        phys = uds.tp.tx_id
+        self.numbers_for(phys)                       # refuse before anything is sent / written
+        st = self.state
+        with st.lock:
+            if not st.done:
+                st.text, st.done = self._read_serial(uds)
+            content = self.lines_for(phys, st.text)
+            workdir = self.dll.workdir if self.dll is not None else os.getcwd()
+            os.makedirs(workdir, exist_ok=True)
+            path = os.path.join(workdir, self.FILE)
+            with open(path, "w", newline="\n", encoding="ascii") as f:
+                f.write(content)
+            st.paths.add(path)
+        self.last_serial = st.text
 
     def __call__(self, seed: bytes, level: int) -> bytes:
         return self.dll(seed, level)

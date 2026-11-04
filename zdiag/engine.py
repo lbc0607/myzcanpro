@@ -13,7 +13,7 @@ from .flash import Segment, load_image
 from .isotp import IsoTp, IsoTpError
 from .project import (DiagConfig, Project, SUPPRESS_SIDS, fmt_hex, parse_hex, parse_id,
                       step_summary)
-from .seedkey import SeedKeyError, SerialAwareKey, ZlgKeyDll, xor_demo_key
+from .seedkey import SERIAL_STATE, SeedKeyError, SerialAwareKey, ZlgKeyDll, xor_demo_key
 from .uds import NegativeResponse, NRC, UdsClient, UdsTimeout
 
 
@@ -177,6 +177,7 @@ class DiagSession:
         self._seg_done: set = set()                   # indexes of CRC steps whose per-segment checks already ran
         self.replies: Dict[int, bytes] = {}           # step index -> data of its (positive) service reply, for result extraction
         self.last_error = ""                          # why the last run_plan failed
+        self.serial_state = SERIAL_STATE              # EcuSerialNum.txt bookkeeping of this run of the program
 
     # -- logging
     def log(self, kind: str, text: str, can_id=None, direction: str = "", data: bytes = b"") -> None:
@@ -289,11 +290,14 @@ class DiagSession:
         path = self.resolve(dll)
         if not os.path.isfile(path):
             raise StepError(f"密钥 DLL 不存在: {path}")
-        wd = s.get("workdir", "").strip() or os.getcwd()
-        kd = ZlgKeyDll(path, workdir=wd)
-        if s.get("use_serial"):
-            return SerialAwareKey(kd, id_map=self.cfg.id_map_int())
-        return kd
+        wd = s.get("workdir", "").strip() or self.base_dir        # default: the program's folder (where EcuSerialNum.txt lives)
+        st = self.cfg.settings
+        try:
+            did = int.from_bytes(parse_hex(st.serial_did), "big")
+        except ValueError:
+            raise StepError(f"序列号 DID 设置无效: {st.serial_did!r}")
+        return SerialAwareKey(ZlgKeyDll(path, workdir=wd), id_map=self.cfg.id_map_int(), serial_did=did,
+                              serial_format=st.serial_format, state=self.serial_state, file_name=st.serial_file)
 
     def _step_unlock(self, s: dict) -> str:
         level = int(s["level"])

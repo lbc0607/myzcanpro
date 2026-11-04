@@ -209,10 +209,10 @@ class UdsClient:
         (NRC 0x36 / 0x37 are raised to the caller on purpose)."""
         if level % 2 == 0:
             raise ValueError("level must be the odd requestSeed sub-function")
+        prep = getattr(key_fn, "prepare", None)             # e.g. write EcuSerialNum.txt (may read DID F18C first);
+        if prep:                                            # done before taking the lock so TesterPresent keeps flowing
+            prep(self)
         with self._lock:                                    # seed + key in one atomic exchange
-            prep = getattr(key_fn, "prepare", None)         # e.g. write ECUserialnumber.txt
-            if prep:
-                prep(self)
             seed = self.request(bytes([0x27, level]))[2:]
             if not any(seed):
                 return False                                # all-zero seed: already unlocked

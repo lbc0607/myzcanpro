@@ -8,6 +8,7 @@ from typing import Optional
 from zdiag.busstats import ChannelCfg
 from zdiag.devmgr import ConnError, DeviceManager
 from zdiag.project import Channel, DiagConfig, SIM_DEVICE, _fill
+from zdiag.seedkey import SERIAL_STATE
 from . import services_def
 
 
@@ -32,6 +33,7 @@ class AppContext:
         self.services = services_def.load_services(self.services_path)
         self.dev = DeviceManager(self.dir, lambda: self.channel.zlgcan_dll)
         self.load()
+        SERIAL_STATE.reset(self.dir, self.diag_cfg.settings.serial_file)      # new run: re-read the serial before the 1st unlock
 
     def load(self) -> None:
         try:

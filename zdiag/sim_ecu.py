@@ -87,7 +87,7 @@ class SimEcu:
                 self._reply(b"\x62" + m[1:3] + self.dids[did])
             elif did == 0xF190:
                 self._reply(b"\x62\xF1\x90" + b"LSVAB12345C000001")
-            elif did == 0xF18C:
+            elif did == 0xF18C and self.serial is not None:             # serial=None: the DID is refused (NRC 31)
                 self._reply(b"\x62\xF1\x8C" + self.serial)
             elif did == 0xF1A0:
                 self._reply(b"\x62\xF1\xA0" + bytes(range(100)))         # long multi-frame
