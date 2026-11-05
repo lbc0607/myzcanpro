@@ -16,7 +16,7 @@ class LogFiles(unittest.TestCase):
     def test_saver_rotates_by_size_and_lines(self):
         s = LogSaver(); base = os.path.join(self.d, "uds_x.txt")
         s.start(base, max_lines=1000, max_bytes=100)
-        for i in range(30): s.write("0123456789")                 # 11 bytes each -> 9 per file
+        for i in range(30): s.write("0123456789")                 # ~11-12 bytes each
         s.stop()
         sizes = [os.path.getsize(part_path(base, i)) for i in range(4)]
         self.assertTrue(all(0 < n <= 100 for n in sizes), sizes); self.assertTrue(os.path.exists(part_path(base, 3)))

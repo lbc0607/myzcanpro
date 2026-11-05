@@ -35,7 +35,7 @@ class LogSaver:
     def write(self, line: str) -> None:
         if not self.fp:
             return
-        n = len(line.encode("utf-8")) + 1
+        n = len(line.encode("utf-8")) + len(os.linesep)          # text mode writes \r\n on Windows
         if self.lines and (self.lines >= self.max_lines or (self.max_bytes and self.size + n > self.max_bytes)):
             self.fp.close()                                 # rotate
             self.part += 1
