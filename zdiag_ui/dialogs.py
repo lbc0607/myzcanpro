@@ -1,12 +1,13 @@
 """Dialogs: 更多设置, CRC configuration widget + 校验码计算工具, 服务编辑器."""
 import os
+import sys
 from typing import Dict, List, Optional
 
 from zdiag.crc import CUSTOM, PRESETS, CrcSpec, crc_calc, preset_names
 from zdiag.flash import load_image
 from zdiag.busstats import ChannelCfg
 from zdiag.devmgr import bitrate_choices_kbps, has_terminator, is_fd_device
-from zdiag.project import Channel, DiagConfig, parse_hex, parse_id
+from zdiag.project import Channel, DiagConfig, LogCfg, parse_hex, parse_id
 from .common import hex_edit, info, int_of, pick_file, warn
 from .qt import Qt, QtWidgets as W
 
@@ -109,12 +110,19 @@ class SettingsDialog(W.QDialog):
         g2 = W.QGroupBox("输出信息")
         g2l = W.QGridLayout(g2)
         self.o_max, self.o_save = W.QLineEdit(), W.QLineEdit()
+        self.o_dir, self.o_mb, self.o_days = W.QLineEdit(), W.QLineEdit(), W.QLineEdit()
         self.o_raw = W.QCheckBox("显示原始帧")
         g2l.addWidget(W.QLabel("输出信息最大行数:"), 0, 0)
         g2l.addWidget(self.o_max, 0, 1)
         g2l.addWidget(W.QLabel("实时保存单个文件的最大行数:"), 1, 0)
         g2l.addWidget(self.o_save, 1, 1)
-        g2l.addWidget(self.o_raw, 2, 0)
+        g2l.addWidget(W.QLabel("日志文件夹(相对程序目录):"), 2, 0)
+        g2l.addWidget(self.o_dir, 2, 1)
+        g2l.addWidget(W.QLabel("日志单个文件最大(MB):"), 3, 0)
+        g2l.addWidget(self.o_mb, 3, 1)
+        g2l.addWidget(W.QLabel("日志保留天数(0=不删除):"), 4, 0)
+        g2l.addWidget(self.o_days, 4, 1)
+        g2l.addWidget(self.o_raw, 5, 0)
         v.addWidget(g2)
         v.addStretch(1)
         return w
@@ -146,13 +154,24 @@ class SettingsDialog(W.QDialog):
         v = W.QVBoxLayout(w)
         g = W.QGridLayout()
         self.e_sdid, self.e_sfile, self.c_sfmt = W.QLineEdit(), W.QLineEdit(), W.QComboBox()
+        self.e_sdir, self.b_sdir, self.b_spy = W.QLineEdit(), W.QPushButton("浏览"), W.QPushButton("python.exe所在文件夹")
+        self.l_sfull = W.QLabel("")
         self.c_sfmt.addItems(["ASCII", "十六进制"])
         g.addWidget(W.QLabel("序列号 DID(0x):"), 0, 0)
         g.addWidget(self.e_sdid, 0, 1)
-        g.addWidget(W.QLabel("文件名(程序所在文件夹):"), 1, 0)
+        g.addWidget(W.QLabel("文件名:"), 1, 0)
         g.addWidget(self.e_sfile, 1, 1)
-        g.addWidget(W.QLabel("序列号写入格式:"), 2, 0)
-        g.addWidget(self.c_sfmt, 2, 1)
+        g.addWidget(W.QLabel("文件所在文件夹:"), 2, 0)
+        g.addWidget(self.e_sdir, 2, 1)
+        g.addWidget(self.b_sdir, 2, 2)
+        g.addWidget(self.b_spy, 2, 3)
+        g.addWidget(W.QLabel("序列号写入格式:"), 3, 0)
+        g.addWidget(self.c_sfmt, 3, 1)
+        g.addWidget(self.l_sfull, 4, 0, 1, 4)
+        self.e_sdir.textChanged.connect(self._show_sfull)
+        self.e_sfile.textChanged.connect(self._show_sfull)
+        self.b_sdir.clicked.connect(self._pick_sdir)
+        self.b_spy.clicked.connect(lambda: self.e_sdir.setText(os.path.dirname(os.path.abspath(sys.executable))))
         v.addLayout(g)
         v.addWidget(W.QLabel("每次运行程序后，第一次安全访问前用 22 <DID> 读取序列号写入文件第1行（负响应则第1行为空），之后不再读取；\n"
                              "每次安全访问前按「被解锁 ECU 的物理地址」把下表的编号写入第2、3行"
@@ -169,6 +188,16 @@ class SettingsDialog(W.QDialog):
         self.b_map_add.clicked.connect(lambda: self._map_row())
         self.b_map_del.clicked.connect(self._map_del)
         return w
+
+    def _show_sfull(self, *_) -> None:
+        d = self.ctx.security.__class__(serial_dir=self.e_sdir.text()).folder(self.ctx.dir)
+        self.l_sfull.setText(f"实际写入: {os.path.join(d, self.e_sfile.text().strip() or '?')}"
+                             "（文件夹留空 = 程序目录；也是密钥 DLL 的工作目录）")
+
+    def _pick_sdir(self) -> None:
+        d = W.QFileDialog.getExistingDirectory(self, "选择 EcuSerialNum.txt 所在文件夹", self.ctx.last_dir)
+        if d:
+            self.e_sdir.setText(d)
 
     def _map_row(self, addr: str = "", a: str = "0", b: str = "0") -> None:
         r = self.t_map.rowCount()
@@ -237,12 +266,19 @@ class SettingsDialog(W.QDialog):
         self.a_brs.setChecked(s.fd_brs)
         self.o_max.setText(str(s.max_log_lines))
         self.o_save.setText(str(s.save_max_lines))
+        lg = self.ctx.logcfg
+        self.o_dir.setText(lg.log_dir)
+        self.o_mb.setText(str(lg.max_file_mb))
+        self.o_days.setText(str(lg.keep_days))
         self.o_raw.setChecked(s.show_raw)
-        self.e_sdid.setText(s.serial_did)
-        self.e_sfile.setText(s.serial_file)
-        self.c_sfmt.setCurrentIndex(1 if s.serial_format == "hex" else 0)
+        sec = self.ctx.security
+        self.e_sdid.setText(sec.serial_did)
+        self.e_sfile.setText(sec.serial_file)
+        self.e_sdir.setText(sec.serial_dir)
+        self.c_sfmt.setCurrentIndex(1 if sec.serial_format == "hex" else 0)
+        self._show_sfull()
         self.t_map.setRowCount(0)
-        for k_, v_ in c.serial_id_map.items():
+        for k_, v_ in sec.id_map.items():
             self._map_row(k_.upper(), str(v_[0]), str(v_[1]))
         if self.with_channel:
             ch = self.channel
@@ -275,8 +311,11 @@ class SettingsDialog(W.QDialog):
             dl_retry=int_of(self.a_retry, "下载文件重试次数", 0, 100),
             block_interval_ms=int_of(self.a_interval, "文件下载$36间隔", 0, 60000),
             fc_timeout_ms=int_of(self.a_fc, "流控超时", 1, 60000),
-            max_log_lines=int_of(self.o_max, "输出信息最大行数", 100, 100000000),
-            save_max_lines=int_of(self.o_save, "实时保存单个文件的最大行数", 100, 100000000))
+            max_log_lines=int_of(self.o_max, "输出信息最大行数", 100, 1000000),
+            save_max_lines=int_of(self.o_save, "实时保存单个文件的最大行数", 100, 10000000))
+        lg_new = LogCfg(log_dir=self.o_dir.text().strip() or "logs",
+                        max_file_mb=int_of(self.o_mb, "日志单个文件大小(MB)", 1, LogCfg.MAX_FILE_MB),
+                        keep_days=int_of(self.o_days, "日志保留天数", 0, LogCfg.MAX_KEEP_DAYS))
         id_map = self._read_map()
         try:
             sdid = parse_hex(self.e_sdid.text())
@@ -284,6 +323,8 @@ class SettingsDialog(W.QDialog):
                 raise ValueError
         except ValueError:
             raise ValueError("序列号 DID 应为 2 字节十六进制，例如 F1 8C")
+        sdid_text = " ".join(f"{b:02X}" for b in sdid)
+        sdir = self.e_sdir.text().strip()
         sfile = self.e_sfile.text().strip()
         if not sfile or any(ch in sfile for ch in '\\/:*?"<>|'):
             raise ValueError("序列号文件名无效")
@@ -303,13 +344,16 @@ class SettingsDialog(W.QDialog):
         s.padding_enabled, s.padding = self.a_pad_on.isChecked(), pad
         s.override_stmin = self.a_ovr_on.isChecked()
         s.fd_brs = self.a_brs.isChecked()
-        s.serial_did, s.serial_file = " ".join(f"{b:02X}" for b in sdid), sfile
-        s.serial_format = "hex" if self.c_sfmt.currentIndex() == 1 else "ascii"
         s.suppress_wait, s.any_negative, s.show_raw = (self.a_supwait.isChecked(),
                                                        self.a_anyneg.isChecked(), self.o_raw.isChecked())
         for k_, v_ in vals.items():
             setattr(s, k_, v_)
-        self.cfg.serial_id_map = id_map
+        self.ctx.logcfg.__dict__.update(lg_new.__dict__)
+        sec = self.ctx.security                                    # program-wide: every window sees it at once
+        sec.serial_did, sec.serial_file, sec.serial_dir = sdid_text, sfile, sdir
+        sec.serial_format = "hex" if self.c_sfmt.currentIndex() == 1 else "ascii"
+        sec.id_map = id_map
+        self.ctx.save()
         if chv:
             for k_, v_ in chv.items():
                 setattr(self.channel, k_, v_)

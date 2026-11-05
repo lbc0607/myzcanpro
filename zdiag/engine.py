@@ -11,7 +11,7 @@ from .bus import Bus, CanFrame
 from .crc import CrcSpec, crc_bytes
 from .flash import Segment, load_image
 from .isotp import IsoTp, IsoTpError
-from .project import (DiagConfig, Project, SUPPRESS_SIDS, fmt_hex, parse_hex, parse_id,
+from .project import (DiagConfig, Project, SecurityCfg, SUPPRESS_SIDS, fmt_hex, parse_hex, parse_id,
                       step_summary)
 from .seedkey import SERIAL_STATE, SeedKeyError, SerialAwareKey, ZlgKeyDll, xor_demo_key
 from .uds import NegativeResponse, NRC, UdsClient, UdsTimeout
@@ -35,6 +35,12 @@ class LogEvent:
     data: bytes
     text: str = ""
 
+    @property
+    def core(self) -> bool:
+        """Shown in the log windows: requests, responses (incl. negative), raw frames when asked for, and errors.
+        Step banners / 'OK' / 'INFO' lines are left out (the step list and the statistics already show them)."""
+        return self.kind in ("REQ", "RSP", "NRC", "CAN", "ERR")
+
     def line(self, fmt: str = "hex") -> str:
         t = time.strftime("%H:%M:%S", time.localtime(self.ts)) + f".{int(self.ts * 1000) % 1000:03d}"
         cid = f"{self.can_id:X}" if self.can_id is not None else ""
@@ -44,7 +50,9 @@ class LogEvent:
         else:
             body = ""
         desc = f"{body}  {self.text}".strip() if self.text else body
-        return f"[{t}] {self.kind:<4} {self.direction:<2} {cid:>4} [{len(self.data)}] {desc}".rstrip()
+        if self.kind in ("REQ", "RSP", "NRC"):              # direction is implied by the kind
+            return f"[{t}] {self.kind:<3} {cid:>4} [{len(self.data)}] {desc}".rstrip()
+        return f"[{t}] {self.kind:<3} {self.direction:<2} {cid:>4} [{len(self.data)}] {desc}".rstrip()
 
 
 class Hooks:
@@ -152,8 +160,10 @@ def segments_for(path: str, base_addr: str = "0") -> List[Segment]:
 class DiagSession:
     def __init__(self, bus: Bus, cfg: DiagConfig, hooks: Optional[Hooks] = None,
                  base_dir: str = ".", can_fd: bool = False, fd_dl: int = 64,
-                 cancel: Optional[threading.Event] = None) -> None:
+                 cancel: Optional[threading.Event] = None, security: Optional[SecurityCfg] = None, app_dir: Optional[str] = None) -> None:
         self.cfg, self.hooks, self.base_dir = cfg, hooks or Hooks(), base_dir
+        self.app_dir = app_dir or base_dir                   # program folder (base of the security file's folder)
+        self.security = security or SecurityCfg()           # program-wide security settings (shared object)
         self.cancel = cancel or threading.Event()
         a, st = cfg.addr, cfg.settings
         self.tap = TapBus(bus, self.hooks.log, {a.phys, a.func, a.resp})
@@ -290,13 +300,13 @@ class DiagSession:
         path = self.resolve(dll)
         if not os.path.isfile(path):
             raise StepError(f"密钥 DLL 不存在: {path}")
-        wd = s.get("workdir", "").strip() or self.base_dir        # default: the program's folder (where EcuSerialNum.txt lives)
-        st = self.cfg.settings
+        st = self.security                                         # read at call time: always the latest settings
+        wd = st.folder(self.app_dir)                              # file + DLL working folder (default: program folder)
         try:
             did = int.from_bytes(parse_hex(st.serial_did), "big")
         except ValueError:
             raise StepError(f"序列号 DID 设置无效: {st.serial_did!r}")
-        return SerialAwareKey(ZlgKeyDll(path, workdir=wd), id_map=self.cfg.id_map_int(), serial_did=did,
+        return SerialAwareKey(ZlgKeyDll(path, workdir=wd), id_map=st.id_map_int(), serial_did=did,
                               serial_format=st.serial_format, state=self.serial_state, file_name=st.serial_file)
 
     def _step_unlock(self, s: dict) -> str:

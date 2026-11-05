@@ -11,11 +11,12 @@ from .appctx import ConnError
 from .common import fill_channel_combo, Bridge, Worker, event_row, info, pick_file, save_file, warn
 from .dialogs import CrcToolDialog, ServiceEditorDialog, SettingsDialog
 from .flash_forms import make_form
+from zdiag.logfiles import purge_old
 from .logsaver import LogSaver
 from .qt import Qt, QtGui, QtWidgets as W
 from .style import COLOR_FAIL, COLOR_IDLE, COLOR_OK, COLOR_RUNNING
 
-PATH_KEYS = ("file", "dll", "source", "workdir")
+PATH_KEYS = ("file", "dll", "source")
 FILTER = "刷新方案 (*.json);;所有文件 (*.*)"
 
 
@@ -546,6 +547,8 @@ class FlashExecutorTab(W.QWidget):
         self.bar.setValue(int(done * 100 / total) if total else 0)
 
     def _on_event(self, e: LogEvent) -> None:
+        if not e.core:
+            return
         r = self.table.rowCount()
         self.table.insertRow(r)
         for c, t in enumerate(event_row(e)):
@@ -570,8 +573,10 @@ class FlashExecutorTab(W.QWidget):
 
     def _toggle_save(self, on: bool) -> None:
         if on:
-            p = self.saver.start(LogSaver.default_name(self.ctx.dir, "flash"),
-                                 self.project.cfg.settings.save_max_lines)
+            lg = self.ctx.logcfg
+            purge_old(lg.folder(self.ctx.dir), lg.keep_days)
+            p = self.saver.start(LogSaver.default_name(lg.folder(self.ctx.dir), "flash"),
+                                 self.project.cfg.settings.save_max_lines, lg.max_bytes)
             info(self, f"日志实时保存到:\n{p}")
         else:
             self.saver.stop()

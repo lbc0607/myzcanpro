@@ -331,7 +331,7 @@ class ScanWindow(W.QMainWindow):
         self.worker.start()
 
     def _on_error(self, msg: str) -> None:
-        if self.panel is not None and self.stack.currentIndex() != LIST:
+        if self.panel is not None and self.stack.currentIndex() != LIST and e.core:
             self.panel.finish(f"失败: {msg}")
         self.l_status.setText(f"失败: {msg}")
         warn(self, msg)
@@ -526,7 +526,7 @@ class ScanWindow(W.QMainWindow):
             self.panel.finish(f"失败: {out.error}")
 
     def _on_event(self, e) -> None:
-        if self.panel is not None and self.stack.currentIndex() != LIST:
+        if self.panel is not None and self.stack.currentIndex() != LIST and e.core:
             self.panel.add(e.line("hex"))
 
     # ------------------------------------------------------------------ editor page

@@ -144,25 +144,18 @@ class UnlockForm(StepForm):
         super().__init__(ctx, svc, parent)
         self.e_desc.setText("ECU解锁")
         g = W.QGridLayout()
-        self.e_level, self.e_dll, self.e_wd = W.QLineEdit("1"), W.QLineEdit(), W.QLineEdit()
-        self.b_dll, self.b_wd = W.QPushButton("浏览"), W.QPushButton("浏览")
+        self.e_level, self.e_dll = W.QLineEdit("1"), W.QLineEdit()
+        self.b_dll = W.QPushButton("浏览")
         _row(g, 0, "级别(奇数):", self.e_level)
         _row(g, 1, "DLL:", self.e_dll, self.b_dll)
-        _row(g, 2, "DLL工作目录:", self.e_wd, self.b_wd)
         g.addWidget(W.QLabel("级别 1 即 27 01 请求种子 / 27 02 发送密钥；3 即 27 03/04，依此类推。"), 3, 0, 1, 3)
         g.addWidget(W.QLabel("种子/密钥长度由 ECU 和 DLL 决定，单帧/多帧传输由协议栈自动处理。"), 4, 0, 1, 3)
         g.addWidget(W.QLabel("每次用 DLL 解锁前会自动写 EcuSerialNum.txt（第1行序列号:本次运行首次解锁前用 22 F1 8C 读取；\n"
                              "第2、3行:按被解锁ECU的物理地址取编号）。序列号 DID、编号映射表在「更多设置 → 安全访问」里配置。\n"
-                             "DLL工作目录留空 = 程序(exe)所在文件夹，该文件也写在这里。"), 5, 0, 1, 3)
+                             "文件名、所在文件夹（也是 DLL 的工作目录）同样在那里配置，所有窗口共用同一份设置。"), 5, 0, 1, 3)
         self.v.addLayout(g)
         self.v.addStretch(1)
         self.b_dll.clicked.connect(lambda: self._browse(self.e_dll, "选择密钥 DLL", "DLL (*.dll);;所有文件 (*.*)"))
-        self.b_wd.clicked.connect(self._pick_dir)
-
-    def _pick_dir(self) -> None:
-        d = W.QFileDialog.getExistingDirectory(self, "选择工作目录", self.ctx.last_dir)
-        if d:
-            self.e_wd.setText(d)
 
     def to_step(self) -> dict:
         level = int_of(self.e_level, "级别", 1, 0x7D)
@@ -170,14 +163,12 @@ class UnlockForm(StepForm):
             raise ValueError("安全级别必须是奇数 (27 请求种子的子功能)")
         if not self.e_dll.text().strip():
             raise ValueError("请选择密钥 DLL")
-        return new_step("unlock", name=self.desc(), level=level, dll=self.e_dll.text().strip(),
-                        workdir=self.e_wd.text().strip())
+        return new_step("unlock", name=self.desc(), level=level, dll=self.e_dll.text().strip())
 
     def load_step(self, s: dict) -> None:
         self.e_desc.setText(s.get("name", ""))
         self.e_level.setText(str(s.get("level", 1)))
         self.e_dll.setText(s.get("dll", ""))
-        self.e_wd.setText(s.get("workdir", ""))
 
 
 # --------------------------------------------------------------------------- 34 文件下载 / Flash driver

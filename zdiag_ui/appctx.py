@@ -6,8 +6,9 @@ from dataclasses import asdict
 from typing import Optional
 
 from zdiag.busstats import ChannelCfg
+from zdiag.logfiles import purge_old
 from zdiag.devmgr import ConnError, DeviceManager
-from zdiag.project import Channel, DiagConfig, SIM_DEVICE, _fill
+from zdiag.project import Channel, DiagConfig, LogCfg, SIM_DEVICE, SecurityCfg, _fill
 from zdiag.seedkey import SERIAL_STATE
 from . import services_def
 
@@ -21,9 +22,12 @@ def app_dir() -> str:
 class AppContext:
     def __init__(self, base: Optional[str] = None) -> None:
         self.dir = base or app_dir()
-        self.cfg_path = os.path.join(self.dir, "myzcanpro_config.json")
+        self.cfg_path = os.path.join(self.dir, "CanVDS_config.json")
+        self.old_cfg_path = os.path.join(self.dir, "myzcanpro_config.json")      # before the rename: still read once
         self.services_path = os.path.join(self.dir, "services.json")
         self.diag_cfg = DiagConfig()
+        self.logcfg = LogCfg()                                     # log folder / file size / retention, shared
+        self.security = SecurityCfg()                              # shared by every window, persisted
         self.channel = Channel()
         # device manager panel state, persisted: selected device/index + last config per channel number
         self.devsel = {"device": SIM_DEVICE, "index": 0}
@@ -33,15 +37,36 @@ class AppContext:
         self.services = services_def.load_services(self.services_path)
         self.dev = DeviceManager(self.dir, lambda: self.channel.zlgcan_dll)
         self.load()
-        SERIAL_STATE.reset(self.dir, self.diag_cfg.settings.serial_file)      # new run: re-read the serial before the 1st unlock
+        purge_old(self.logcfg.folder(self.dir), self.logcfg.keep_days)           # old automatic logs
+        SERIAL_STATE.reset(self.security.folder(self.dir), self.security.serial_file)      # new run: re-read the serial before the 1st unlock
 
     def load(self) -> None:
-        try:
-            with open(self.cfg_path, "r", encoding="utf-8") as f:
-                d = json.load(f)
-        except (OSError, ValueError):
+        d = None
+        for path in (self.cfg_path, self.old_cfg_path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                break
+            except (OSError, ValueError):
+                continue
+        if not isinstance(d, dict):
             return
         self.diag_cfg = DiagConfig.from_dict(d.get("diag", {}))
+        if isinstance(d.get("logcfg"), dict):
+            _fill(self.logcfg, d["logcfg"])
+            try:
+                self.logcfg.validate()
+            except (ValueError, TypeError):
+                self.logcfg = LogCfg()
+        if isinstance(d.get("security"), dict):
+            self.security = SecurityCfg.from_dict(d["security"])
+        else:                                                  # configs of earlier versions kept it inside "diag"
+            old = d.get("diag", {}) or {}
+            legacy = dict((old.get("settings") or {}))
+            legacy = {k: v for k, v in legacy.items() if k in ("serial_did", "serial_file", "serial_format")}
+            if isinstance(old.get("serial_id_map"), dict):
+                legacy["id_map"] = old["serial_id_map"]
+            self.security = SecurityCfg.from_dict(legacy)
         _fill(self.channel, d.get("channel", {}))
         dv = d.get("devsel", {})
         if isinstance(dv.get("device"), str):
@@ -58,7 +83,7 @@ class AppContext:
             self.scan_dir = d["scan_dir"]
 
     def save(self) -> None:
-        d = {"diag": self.diag_cfg.to_dict(), "channel": asdict(self.channel), "last_dir": self.last_dir, "scan_dir": self.scan_dir,
+        d = {"diag": self.diag_cfg.to_dict(), "security": self.security.to_dict(), "logcfg": asdict(self.logcfg), "channel": asdict(self.channel), "last_dir": self.last_dir, "scan_dir": self.scan_dir,
              "devsel": self.devsel, "chan_cfgs": {str(k): asdict(v) for k, v in self.chan_cfgs.items()}}
         try:
             with open(self.cfg_path, "w", encoding="utf-8") as f:
@@ -72,7 +97,7 @@ class AppContext:
         bus = self.dev.acquire(ch.channel, owner, cfg.addr, ch.sim_profile, cfg.settings.rx_padding)
         ccfg = self.dev.cfg_of(ch.channel)
         return DiagSession(bus, cfg, hooks, base_dir=base_dir or self.dir,
-                           can_fd=bool(ccfg and ccfg.is_fd), fd_dl=ch.fd_dl)
+                           can_fd=bool(ccfg and ccfg.is_fd), fd_dl=ch.fd_dl, security=self.security, app_dir=self.dir)
 
     def reload_services(self) -> None:
         self.services = services_def.load_services(self.services_path)

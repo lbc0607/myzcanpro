@@ -52,7 +52,7 @@ class SendTab(W.QWidget):
         self.l_time = W.QLabel("发送时间(s):")
         cells = [
             (0, 0, "通道:", self.c_ch), (1, 0, "帧ID:0x", self.e_id), (2, 0, "每次发送帧数:", self.e_per),
-            (0, 2, "帧类型:", self.c_type), (1, 2, "数据长度:", self.c_len), (2, 2, "发送次数:", self.e_count),
+            (0, 2, "帧类型:", self.c_type), (1, 2, "数据长度:", self.c_len), (2, 2, "发送次数(-1=一直发送):", self.e_count),
             (3, 2, "名称(可选):", self.e_name), (0, 4, "帧格式:", self.c_fmt), (1, 4, "数据:0x", self.e_data),
             (2, 4, "每次间隔(ms):", self.e_int)]
         for r, c, lab, wd in cells:

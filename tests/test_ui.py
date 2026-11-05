@@ -81,6 +81,10 @@ class SendTests(Base):
         c = t.table.item(0, 2); c.setText("7df"); self.assertEqual(t.items[0].can_id, 0x7DF)
         W.QMessageBox.calls.clear(); t.table.item(0, 9).setText("0")                          # invalid -> reverted
         self.assertTrue(msgs("warn")); self.assertEqual(t.items[0].count, 1); self.assertEqual(t.table.item(0, 9).text(), "1")
+        t.table.item(0, 9).setText("-1"); self.assertEqual(t.items[0].count, -1)               # forever
+        W.QMessageBox.calls.clear(); t.table.item(0, 9).setText("9000000000"); self.assertTrue(msgs("warn")); self.assertEqual(t.items[0].count, -1)
+        t.table.item(0, 9).setText("9000000"); self.assertEqual(t.items[0].count, 9000000)    # big but legal, no crash
+        t.table.item(0, 9).setText("1")
         t.table.item(0, 6).setText("01 02 03"); self.assertEqual(t.items[0].data, bytes([1, 2, 3]))
         self.fill(length="2", data="01 02 03"); W.QMessageBox.calls.clear(); t.b_add.click()
         self.assertTrue(msgs("warn")); self.assertEqual(len(t.items), 1)                      # data longer than length
@@ -410,7 +414,7 @@ class DiagWindowTests(Base):
         d.e_sdid.setText("f1 90"); d.e_sfile.setText("Sn.txt"); d.c_sfmt.setCurrentIndex(1); d.ch_fddl.setCurrentText("32"); d.ch_sim.setCurrentIndex(1)
         d.btn_ok.click()
         self.assertEqual((cfg.settings.p2_ms, cfg.settings.padding_enabled, cfg.keepalive.period_ms), (1234, False, 500))
-        self.assertEqual((cfg.settings.rx_padding, cfg.settings.padding), (0xCC, 0x55)); self.assertEqual(cfg.serial_id_map, {"7e2": [5, 6], "7e8": [2, 4]}); self.assertEqual((cfg.settings.serial_did, cfg.settings.serial_file, cfg.settings.serial_format), ("F1 90", "Sn.txt", "hex")); self.assertEqual((ch.fd_dl, ch.sim_profile), (32, "old"))
+        self.assertEqual((cfg.settings.rx_padding, cfg.settings.padding), (0xCC, 0x55)); sec = self.ctx.security; self.assertEqual(sec.id_map, {"7e2": [5, 6], "7e8": [2, 4]}); self.assertEqual((sec.serial_did, sec.serial_file, sec.serial_format), ("F1 90", "Sn.txt", "hex")); self.assertEqual((ch.fd_dl, ch.sim_profile), (32, "old"))
         d2 = SettingsDialog(self.ctx, cfg, ch)
         d2.a_p2.setText("abc"); d2.e_phys.setText("1fff")
         W.QMessageBox.calls.clear(); d2.btn_ok.click()
@@ -759,7 +763,7 @@ class FlashTests(Base):
         self.assertEqual(ex.b_start.text(), "开始刷写"); self.assertEqual(ex.bar.value(), 100)
         self.assertTrue(msgs("info")[-1][1] == "完成")
         types = {ex.table.item(r, 1).text() for r in range(ex.table.rowCount())}
-        self.assertTrue({"请求", "响应", "信息", "完成"} <= types)
+        self.assertTrue({"请求", "响应"} <= types); self.assertFalse({"信息", "完成"} & types)       # step banners are not logged
         ecu = self.ctx.dev.sim_ecu(0)
         self.assertEqual(ecu.reset_count, 1); self.assertEqual(ecu.crc_checked, [(0x0102, True), (0x0103, True)]); self.assertEqual(len(ecu.seed), 16)
         self.assertEqual(ecu.erased, [(0, 2500, b"\x01")])                  # erase: file start / total size / ext byte

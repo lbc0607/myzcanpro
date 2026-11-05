@@ -6,6 +6,7 @@ older versions keep loading.
 from __future__ import annotations
 import copy
 import json
+import os
 import re
 from dataclasses import dataclass, field, asdict, fields
 from typing import Any, Dict, List
@@ -102,9 +103,6 @@ class Settings:
     save_max_lines: int = 100000
     show_raw: bool = False
     auto_fc: bool = True
-    serial_did: str = "F1 8C"       # DID read (22) for the ECU serial number written to EcuSerialNum.txt line 1
-    serial_file: str = "EcuSerialNum.txt"
-    serial_format: str = "ascii"  # how the serial number is written: ascii | hex
     fd_brs: bool = True           # CAN FD diagnostic frames carry BRS (bit-rate switch); irrelevant when both rates are equal
 
 
@@ -116,17 +114,73 @@ class Channel:
     sim_profile: str = "new"      # simulator only: "old" (2-byte seed, DF FE) | "new" (16-byte, 01 02)
 
 
+DEFAULT_ID_MAP = {"7e2": [0, 0], "7e3": [1, 2], "785": [2, 4], "645": [1, 3]}
+
+
+@dataclass
+class SecurityCfg:
+    """Security-access settings.  ONE object per program (AppContext.security), shared by every window and
+    persisted in the program config - never part of a flash plan or a per-window copy."""
+    serial_did: str = "F1 8C"       # DID read (22) for the ECU serial number written to the file's line 1
+    serial_file: str = "EcuSerialNum.txt"
+    serial_dir: str = ""            # folder of that file (= working folder of the key DLL); "" -> program folder
+    serial_format: str = "ascii"    # how the serial number is written: ascii | hex
+    id_map: Dict[str, List[int]] = field(default_factory=lambda: {k: list(v) for k, v in DEFAULT_ID_MAP.items()})
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @staticmethod
+    def from_dict(d: dict) -> "SecurityCfg":
+        c = SecurityCfg()
+        d = d or {}
+        _fill(c, {k: v for k, v in d.items() if k != "id_map"})
+        if isinstance(d.get("id_map"), dict):
+            c.id_map = {str(k).lower(): [int(x) for x in v] for k, v in d["id_map"].items()}
+        return c
+
+    def id_map_int(self) -> Dict[int, tuple]:
+        return {int(k, 16): (int(v[0]), int(v[1])) for k, v in self.id_map.items()}
+
+    def folder(self, base: str) -> str:
+        """Where the file lives: configured folder (relative -> under the program folder) or the program folder."""
+        d = (self.serial_dir or "").strip()
+        return os.path.normpath(os.path.join(base, d)) if d else base
+
+
+@dataclass
+class LogCfg:
+    """Real-time log / message saving (program-wide, persisted).  Shape follows the in-house tool's MyLogRecord."""
+    log_dir: str = "logs"           # folder of the automatically named logs (relative -> program folder)
+    max_file_mb: int = 3            # one file is closed and a new part started at this size (MaxFileSize)
+    keep_days: int = 7              # automatically written logs older than this are deleted; 0 = keep forever (DeleteDay)
+
+    MAX_FILE_MB = 1024
+    MAX_KEEP_DAYS = 3650
+
+    def folder(self, base: str) -> str:
+        d = (self.log_dir or "").strip() or "logs"
+        return os.path.normpath(os.path.join(base, d))
+
+    @property
+    def max_bytes(self) -> int:
+        return int(self.max_file_mb) * 1024 * 1024
+
+    def validate(self) -> None:
+        if not 1 <= self.max_file_mb <= self.MAX_FILE_MB:
+            raise ValueError(f"单个日志文件大小应为 1~{self.MAX_FILE_MB} MB")
+        if not 0 <= self.keep_days <= self.MAX_KEEP_DAYS:
+            raise ValueError(f"日志保留天数应为 0~{self.MAX_KEEP_DAYS}（0 = 不自动删除）")
+
+
 @dataclass
 class DiagConfig:
     addr: Addressing = field(default_factory=Addressing)
     keepalive: KeepAlive = field(default_factory=KeepAlive)
     settings: Settings = field(default_factory=Settings)
-    serial_id_map: Dict[str, List[int]] = field(
-        default_factory=lambda: {"7e2": [0, 0], "7e3": [1, 2], "785": [2, 4], "645": [1, 3]})
 
     def to_dict(self) -> dict:
-        return {"addr": self.addr.to_dict(), "keepalive": asdict(self.keepalive),
-                "settings": asdict(self.settings), "serial_id_map": self.serial_id_map}
+        return {"addr": self.addr.to_dict(), "keepalive": asdict(self.keepalive), "settings": asdict(self.settings)}
 
     @staticmethod
     def from_dict(d: dict) -> "DiagConfig":
@@ -135,12 +189,7 @@ class DiagConfig:
         c.addr = Addressing.from_dict(d.get("addr", {}))
         _fill(c.keepalive, d.get("keepalive", {}))
         _fill(c.settings, d.get("settings", {}))
-        if "serial_id_map" in d:
-            c.serial_id_map = {str(k).lower(): list(v) for k, v in d["serial_id_map"].items()}
         return c
-
-    def id_map_int(self) -> Dict[int, tuple]:
-        return {int(k, 16): (int(v[0]), int(v[1])) for k, v in self.serial_id_map.items()}
 
 
 # --------------------------------------------------------------------------- flash steps
@@ -149,7 +198,7 @@ STEP_TYPES = ("service", "delay", "unlock", "driver", "download", "routine")
 _STEP_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "service": {"name": "", "addr": "phys", "pdu": "", "suppress": False, "check": True, "expect": ""},
     "delay": {"name": "延时", "ms": 1000},
-    "unlock": {"name": "ECU解锁", "level": 1, "dll": "", "workdir": ""},
+    "unlock": {"name": "ECU解锁", "level": 1, "dll": ""},
     "driver": {"name": "Flash driver", "file": "", "base_addr": "0", "addr_len": 4, "size_len": 4, "dfi": "00"},
     "download": {"name": "文件下载", "file": "", "base_addr": "0", "addr_len": 4, "size_len": 4, "dfi": "00"},
     # rkind: "custom"/"query" = generic 31 request (placeholders {addr} {len} {crc}); "erase" = 擦除内存;
@@ -225,7 +274,7 @@ class Project:
     @staticmethod
     def from_dict(d: dict) -> "Project":
         if d.get("format") != "myzcanpro-flash":
-            raise ValueError("不是 myzcanpro 刷新方案文件")
+            raise ValueError("不是 CanVDS 刷新方案文件")
         p = Project(name=d.get("name", "未命名"), can_type=d.get("can_type", "CAN"))
         p.cfg = DiagConfig.from_dict(d.get("config", {}))
         p.steps = [normalize_step(s) for s in d.get("steps", [])]

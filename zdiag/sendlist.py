@@ -8,6 +8,8 @@ Semantics (modelled on ZCANPro's 普通发送):
   * 发送速度 N 倍: all intervals are divided by N
 """
 from __future__ import annotations
+import heapq
+import itertools
 import json
 import time
 from dataclasses import asdict, dataclass, field, fields
@@ -18,6 +20,10 @@ from .bus import CanFrame
 FD_LENGTHS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64)
 FORMAT, VERSION = "myzcanpro-send", 1
 PARALLEL, SERIAL = "并行发送模式", "串行发送模式"
+FOREVER = -1                       # count == -1: keep sending until stopped
+MAX_COUNT = 100_000_000            # upper bound of 发送次数 (use -1 for "forever")
+MAX_PER_SEND = 1000                # frames per round
+MAX_INTERVAL_MS = 3_600_000        # 1 h
 
 
 @dataclass
@@ -68,14 +74,20 @@ class SendItem:
                 raise ValueError("CAN 数据长度应为 0~8")
             if len(self.data) > self.length:
                 raise ValueError(f"数据有 {len(self.data)} 字节，超出数据长度 {self.length}")
-        if self.per_send < 1 or self.count < 1:
-            raise ValueError("每次发送帧数、发送次数必须 ≥ 1")
-        if self.interval_ms < 0:
-            raise ValueError("每次间隔不能为负")
+        if not 1 <= self.per_send <= MAX_PER_SEND:
+            raise ValueError(f"每次发送帧数应为 1~{MAX_PER_SEND}")
+        if self.count != FOREVER and not 1 <= self.count <= MAX_COUNT:
+            raise ValueError(f"发送次数应为 1~{MAX_COUNT}，或 -1 表示一直发送")
+        if not 0 <= self.interval_ms <= MAX_INTERVAL_MS:
+            raise ValueError(f"每次间隔应为 0~{MAX_INTERVAL_MS} ms")
+
+    @property
+    def forever(self) -> bool:
+        return self.count == FOREVER
 
     @property
     def total_frames(self) -> int:
-        return self.per_send * self.count
+        return -1 if self.forever else self.per_send * self.count
 
 
 def frame_at(it: SendItem, index: int, fd: bool = False, brs: bool = False) -> CanFrame:
@@ -99,22 +111,39 @@ class Event:
     frames: List[CanFrame] = field(default_factory=list)
 
 
-def build_schedule(items: List[SendItem], mode: str = PARALLEL, speed: float = 1.0,
-                   fd: bool = False, brs: bool = False) -> List[Event]:
+def _row_events(row: int, it: SendItem, base: float, step: float, fd: bool, brs: bool):
+    """Lazy events of one row (memory stays O(1) however large `count` is; count == -1 never ends)."""
+    rounds = itertools.count() if it.forever else range(it.count)
+    for r in rounds:
+        yield Event(base + r * step, row, r, [frame_at(it, r * it.per_send + k, fd, brs) for k in range(it.per_send)])
+
+
+def iter_schedule(items: List[SendItem], mode: str = PARALLEL, speed: float = 1.0,
+                  fd: bool = False, brs: bool = False):
+    """Events in time order, generated on demand."""
     if speed <= 0:
         raise ValueError("发送速度必须大于 0")
-    events: List[Event] = []
-    offset = 0.0
-    for row, it in enumerate(items):
-        step = it.interval_ms / 1000.0 / speed
-        base = offset if mode == SERIAL else 0.0
-        for r in range(it.count):
-            frames = [frame_at(it, r * it.per_send + k, fd, brs) for k in range(it.per_send)]
-            events.append(Event(base + r * step, row, r, frames))
-        if mode == SERIAL:
-            offset = base + (it.count - 1) * step
-    events.sort(key=lambda e: (e.t, e.row, e.rnd))
-    return events
+    key = lambda e: (e.t, e.row, e.rnd)
+    if mode == SERIAL:
+        def chain():
+            offset = 0.0
+            for row, it in enumerate(items):
+                step = it.interval_ms / 1000.0 / speed
+                yield from _row_events(row, it, offset, step, fd, brs)
+                if it.forever:
+                    return                                     # nothing can follow an endless row
+                offset += (it.count - 1) * step
+        return chain()
+    gens = [_row_events(row, it, 0.0, it.interval_ms / 1000.0 / speed, fd, brs) for row, it in enumerate(items)]
+    return heapq.merge(*gens, key=key)
+
+
+def build_schedule(items: List[SendItem], mode: str = PARALLEL, speed: float = 1.0,
+                   fd: bool = False, brs: bool = False) -> List[Event]:
+    """Whole schedule as a list (small lists / tests only; endless rows are refused)."""
+    if any(it.forever for it in items):
+        raise ValueError("发送次数为 -1(一直发送)的行不能展开成完整时间表")
+    return list(iter_schedule(items, mode, speed, fd, brs))
 
 
 @dataclass
@@ -138,9 +167,9 @@ def run_send(bus, items: List[SendItem], mode: str = PARALLEL, speed: float = 1.
              sleep: Callable[[float], None] = time.sleep) -> SendResult:
     for it in items:
         it.validate(fd)
-    events = build_schedule(items, mode, speed, fd, brs)
+    events = iter_schedule(items, mode, speed, fd, brs)
     res = SendResult(per_row={i: [0, 0] for i in range(len(items))})
-    remaining = {i: it.count for i, it in enumerate(items)}
+    remaining = {i: it.count for i, it in enumerate(items)}          # -1 never reaches 0
     status = on_status or (lambda i, s: None)
     started = set()
     t0 = clock()
@@ -172,12 +201,13 @@ def run_send(bus, items: List[SendItem], mode: str = PARALLEL, speed: float = 1.
                     break
         if res.stopped_on_fail:
             break
-        remaining[ev.row] -= 1
+        if remaining[ev.row] > 0:
+            remaining[ev.row] -= 1
         if remaining[ev.row] == 0:
             status(ev.row, "失败" if res.per_row[ev.row][1] else "完成")
     res.elapsed = clock() - t0
     for row in started:                                       # rows interrupted mid-way
-        if remaining[row] > 0 and not (res.stopped_on_fail and res.per_row[row][1]):
+        if (remaining[row] > 0 or remaining[row] == FOREVER) and not (res.stopped_on_fail and res.per_row[row][1]):
             status(row, "已停止")
     return res
 
@@ -193,5 +223,5 @@ def load_list(path: str) -> List[SendItem]:
     with open(path, "r", encoding="utf-8") as f:
         d = json.load(f)
     if d.get("format") != FORMAT:
-        raise ValueError("不是 myzcanpro 的发送列表文件")
+        raise ValueError("不是 CanVDS 的发送列表文件")
     return [SendItem.from_dict(x) for x in d.get("items", [])]

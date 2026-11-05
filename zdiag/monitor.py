@@ -11,6 +11,7 @@ import time
 from typing import Deque, Dict, List, Optional, Tuple
 
 from .bus import CanFrame
+from .logfiles import part_path
 
 TX, RX = "TX", "RX"
 
@@ -72,15 +73,34 @@ class CsvRecorder:
     HEADER = "序号,时间标识(s),通道,帧ID,CAN类型,方向,长度,数据\n"
     MAX_BACKLOG = 500_000
 
-    def __init__(self, path: str) -> None:
-        self.path = path
+    def __init__(self, path: str, max_bytes: int = 0) -> None:
+        self.base, self.path = path, path
+        self.max_bytes = max(int(max_bytes), 0)             # 0 = one file; else a new part (name_1.csv ...) at this size
+        self.part, self.size = 0, 0
+        self.paths = [path]
         self.written = 0
         self.dropped = 0
         self._q: "queue.SimpleQueue" = queue.SimpleQueue()
-        self._f = open(path, "w", encoding="utf-8-sig", newline="")          # BOM: Excel opens Chinese headers correctly
-        self._f.write(self.HEADER)
+        self._f = self._open_part()
         self._thr = threading.Thread(target=self._run, name="monitor-save", daemon=True)
         self._thr.start()
+
+    def _open_part(self):
+        f = open(part_path(self.base, self.part), "w", encoding="utf-8-sig", newline="")   # BOM: Excel reads Chinese headers
+        f.write(self.HEADER)
+        self.size = len(self.HEADER.encode("utf-8"))
+        return f
+
+    def _rotate_if_needed(self) -> None:
+        if self.max_bytes and self.size >= self.max_bytes:
+            try:
+                self._f.close()
+                self.part += 1
+                self._f = self._open_part()
+                self.path = part_path(self.base, self.part)
+                self.paths.append(self.path)
+            except OSError:
+                pass
 
     def put(self, line: str) -> None:
         if self._q.qsize() > self.MAX_BACKLOG:
@@ -104,7 +124,10 @@ class CsvRecorder:
             except queue.Empty:
                 pass
             try:
-                self._f.write("".join(batch))
+                text = "".join(batch)
+                self._f.write(text)
+                self.size += len(text.encode("utf-8"))
+                self._rotate_if_needed()
             except OSError:
                 pass
             self.written += len(batch)
@@ -186,9 +209,9 @@ class FrameTap:
             return list(self._ring)[-n:]
 
     # ------------------------------------------------------------ real-time save
-    def start_record(self, path: str) -> None:
+    def start_record(self, path: str, max_bytes: int = 0) -> None:
         self.stop_record()
-        self.recorder = CsvRecorder(path)
+        self.recorder = CsvRecorder(path, max_bytes)
 
     def stop_record(self) -> Optional[CsvRecorder]:
         rec, self.recorder = self.recorder, None

@@ -91,7 +91,7 @@ class Executor:
     @staticmethod
     def from_dict(d: dict) -> "Executor":
         if d.get("format") != FORMAT:
-            raise ScanError("不是 myzcanpro 执行器文件")
+            raise ScanError("不是 CanVDS 执行器文件")
         steps = [normalize_step(s) for s in d.get("steps", [])]
         res = {"step": -1, "skip": -1, "parse": "hex"}
         res.update(d.get("result") or {})

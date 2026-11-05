@@ -167,5 +167,48 @@ class SerialTests(Base):
         self.assertFalse(os.path.exists(os.path.join(self.wd, SERIAL_FILE)))
 
 
+class SharedSettingsTests(unittest.TestCase):
+    def test_persist_and_migration(self):
+        from zdiag_ui.appctx import AppContext
+        import json
+        d = tempfile.mkdtemp()
+        c = AppContext(d)
+        self.assertEqual(c.security.id_map["7e3"], [1, 2])
+        c.security.serial_dir, c.security.serial_file, c.security.id_map = "sub", "N.txt", {"7e2": [3, 4]}
+        c.logcfg.max_file_mb, c.logcfg.keep_days = 5, 0
+        c.save()
+        c2 = AppContext(d)
+        self.assertEqual((c2.security.serial_dir, c2.security.serial_file, c2.security.id_map), ("sub", "N.txt", {"7e2": [3, 4]}))
+        self.assertEqual((c2.logcfg.max_file_mb, c2.logcfg.keep_days), (5, 0))
+        # config written by the previous version (settings inside "diag")
+        d2 = tempfile.mkdtemp()
+        with open(os.path.join(d2, "myzcanpro_config.json"), "w", encoding="utf-8") as f:
+            json.dump({"diag": {"settings": {"serial_did": "F1 90", "serial_file": "Old.txt", "p2_ms": 777},
+                                "serial_id_map": {"7E2": [9, 9]}}}, f)
+        c3 = AppContext(d2)
+        self.assertEqual((c3.security.serial_did, c3.security.serial_file, c3.security.id_map), ("F1 90", "Old.txt", {"7e2": [9, 9]}))
+        self.assertEqual(c3.diag_cfg.settings.p2_ms, 777)
+
+    def test_sessions_share_the_context_object_and_folder(self):
+        from zdiag_ui.appctx import AppContext
+        from zdiag.engine import DiagSession
+        c = AppContext(tempfile.mkdtemp())
+        a, b = VirtualBus.pair()
+        s1 = DiagSession(a, c.diag_cfg, security=c.security, app_dir=c.dir)
+        s2 = DiagSession(b, c.diag_cfg, security=c.security, app_dir=c.dir)
+        c.security.serial_dir = os.path.join(c.dir, "elsewhere")
+        self.assertIs(s1.security, s2.security)
+        self.assertEqual(s1.security.folder(s1.app_dir), os.path.join(c.dir, "elsewhere"))
+        s1.close(); s2.close()
+
+    def test_folder_resolution(self):
+        from zdiag.project import SecurityCfg
+        base = os.path.abspath(os.sep + "app")
+        self.assertEqual(SecurityCfg().folder(base), base)
+        self.assertEqual(SecurityCfg(serial_dir="x").folder(base), os.path.join(base, "x"))
+        other = os.path.abspath(os.sep + "py")
+        self.assertEqual(SecurityCfg(serial_dir=other).folder(base), other)       # absolute wins
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

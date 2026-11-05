@@ -98,13 +98,13 @@ class MonitorWindow(W.QMainWindow):
         if self.tap.recorder is not None:
             rec = self.tap.stop_record()
             info(self, f"已停止实时保存，共写入 {rec.written} 帧" + (f"（积压丢弃 {rec.dropped} 帧）" if rec.dropped else "")
-                 + f"\n{rec.path}")
+                 + f"\n{rec.paths[0]}" + (f"\n… {rec.paths[-1]}（共 {len(rec.paths)} 个文件，每个最大 {rec.max_bytes // 1048576} MB）" if len(rec.paths) > 1 else ""))
         else:
             path = save_file(self, self.ctx, "实时保存报文", FILTER)
             if not path:
                 return
             try:
-                self.tap.start_record(path)
+                self.tap.start_record(path, self.ctx.logcfg.max_bytes)
             except OSError as e:
                 warn(self, f"无法创建文件: {e}")
                 return

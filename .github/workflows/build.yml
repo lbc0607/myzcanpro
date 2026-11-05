@@ -20,12 +20,12 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
       - run: >
-          python -m PyInstaller --noconfirm --clean --windowed --name myzcanpro --onedir run_app.py
+          python -m PyInstaller --noconfirm --clean --windowed --name CanVDS --onedir run_app.py
           --hidden-import zdiag --hidden-import zdiag_ui --exclude-module PySide2 --exclude-module tkinter
       - name: Copy vendor files (optional)
         shell: bash
-        run: if [ -d vendor ]; then cp -r vendor/. dist/myzcanpro/; fi
+        run: if [ -d vendor ]; then cp -r vendor/. dist/CanVDS/; fi
       - uses: actions/upload-artifact@v4
         with:
-          name: myzcanpro-win32
-          path: dist/myzcanpro
+          name: CanVDS-win32
+          path: dist/CanVDS

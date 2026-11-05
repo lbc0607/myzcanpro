@@ -1,4 +1,4 @@
-"""myzcanpro entry point (double-click run.bat, or run the packaged exe)."""
+"""CanVDS entry point (double-click run.bat, or run the packaged exe)."""
 import os
 import sys
 import time

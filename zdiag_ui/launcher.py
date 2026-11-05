@@ -44,7 +44,7 @@ class FloatHost(W.QWidget):
         super().__init__()
         self.shell, self.key, self.widget_, self.released = shell, key, widget, False
         self.setWindowFlags(Qt.Window)
-        self.setWindowTitle(f"{title} - myzcanpro")
+        self.setWindowTitle(f"{title} - CanVDS")
         self.resize(1180, 720)
         v = W.QVBoxLayout(self)
         v.setContentsMargins(2, 2, 2, 2)
@@ -78,7 +78,7 @@ class LauncherWindow(W.QMainWindow):
         self.ctx = ctx
         self.windows = {}            # tool key -> widget (docked in a tab or inside a FloatHost)
         self.floating = {}           # tool key -> FloatHost
-        self.setWindowTitle("myzcanpro")
+        self.setWindowTitle("CanVDS")
         self.resize(1280, 780)
         root = W.QWidget()
         self.setCentralWidget(root)
@@ -91,7 +91,7 @@ class LauncherWindow(W.QMainWindow):
         bh = W.QHBoxLayout(bar)
         bh.setContentsMargins(8, 0, 8, 0)
         bh.setSpacing(2)
-        brand = W.QLabel("myzcanpro")
+        brand = W.QLabel("CanVDS")
         brand.setObjectName("brand")
         bh.addWidget(brand)
         self.b_home = W.QPushButton("设备管理")

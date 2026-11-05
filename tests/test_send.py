@@ -26,6 +26,51 @@ def run(items, bus=None, clk=None, **kw):
     return res, bus, status
 
 
+class CountBoundTests(unittest.TestCase):
+    def test_bounds_validation(self):
+        from zdiag.sendlist import MAX_COUNT
+        SendItem(count=MAX_COUNT).validate(); SendItem(count=-1).validate()
+        for bad in (0, -2, MAX_COUNT + 1, 9_000_000_000_000):
+            with self.assertRaises(ValueError): SendItem(count=bad).validate()
+        with self.assertRaises(ValueError): SendItem(per_send=0).validate()
+        with self.assertRaises(ValueError): SendItem(per_send=10**9).validate()
+        with self.assertRaises(ValueError): SendItem(interval_ms=-1).validate()
+        with self.assertRaises(ValueError): SendItem(interval_ms=10**9).validate()
+
+    def test_huge_count_is_lazy(self):
+        # 90,000,000 rounds must not be materialised: stop after a few frames via cancel
+        clk = Clock(); cancel = threading.Event()
+        class B:
+            n = 0
+            def send(self, fr):
+                self.n += 1
+                if self.n == 5: cancel.set()
+        b = B()
+        res = run_send(b, [SendItem(count=90_000_000)], clock=clk, sleep=clk.sleep, cancel=cancel)
+        self.assertEqual((b.n, res.cancelled), (5, True))
+
+    def test_forever_runs_until_cancelled_and_reports_stopped(self):
+        clk = Clock(); cancel = threading.Event(); status = []
+        class B:
+            n = 0
+            def send(self, fr):
+                self.n += 1
+                if self.n == 1000: cancel.set()
+        b = B()
+        res = run_send(b, [SendItem(count=-1, interval_ms=1), SendItem(count=2)], clock=clk, sleep=clk.sleep, cancel=cancel,
+                       on_status=lambda i, s: status.append((i, s)))
+        self.assertEqual((b.n >= 1000, res.cancelled), (True, True))
+        self.assertIn((0, "已停止"), status); self.assertNotIn((0, "完成"), status)
+        self.assertIn((1, "完成"), status)                       # parallel mode: the finite row still finishes
+
+    def test_serial_mode_endless_row_blocks_followers(self):
+        from zdiag.sendlist import iter_schedule
+        ev = iter_schedule([SendItem(count=-1), SendItem(can_id=0x100)], SERIAL)
+        ids = {e.frames[0].can_id for _, e in zip(range(50), ev)}
+        self.assertEqual(ids, {0x7E2})
+        with self.assertRaises(ValueError): build_schedule([SendItem(count=-1)])
+
+
 class FrameTests(unittest.TestCase):
     def test_padding_to_length_and_increments(self):
         it = SendItem(can_id=0x7E2, data=bytes([2, 0x10, 1]), length=8)

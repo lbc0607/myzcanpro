@@ -9,6 +9,7 @@ from zdiag.project import fmt_hex, parse_hex, parse_id
 from .appctx import ConnError
 from .common import fill_channel_combo, Bridge, Worker, event_row, info, pick_file, save_file, warn
 from .dialogs import ServiceEditorDialog, SettingsDialog
+from zdiag.logfiles import purge_old
 from .logsaver import LogSaver
 from .qt import Qt, QtWidgets as W, Signal
 
@@ -504,6 +505,8 @@ class DiagWindow(W.QMainWindow):
         return "hex" if self.c_fmt.currentIndex() == 0 else "ascii"
 
     def _on_event(self, e: LogEvent) -> None:
+        if not e.core:
+            return
         self.events.append(e)
         limit = self.cfg.settings.max_log_lines
         if len(self.events) > limit + 1000:
@@ -530,7 +533,10 @@ class DiagWindow(W.QMainWindow):
 
     def _toggle_save(self, on: bool) -> None:
         if on:
-            path = self.saver.start(LogSaver.default_name(self.ctx.dir, "uds"), self.cfg.settings.save_max_lines)
+            lg = self.ctx.logcfg
+            purge_old(lg.folder(self.ctx.dir), lg.keep_days)
+            path = self.saver.start(LogSaver.default_name(lg.folder(self.ctx.dir), "uds"),
+                                    self.cfg.settings.save_max_lines, lg.max_bytes)
             info(self, f"日志实时保存到:\n{path}")
         else:
             self.saver.stop()
