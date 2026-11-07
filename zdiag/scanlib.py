@@ -151,9 +151,27 @@ def default_skip(pdu: bytes) -> int:
     return 3 if pdu and pdu[0] == 0x22 else 1
 
 
+PARSE_MODES = [("hex", "十六进制原文"), ("ascii", "ASCII 文本"), ("dec", "十进制数值(大端)")]
+
+
+def render_result(raw: bytes, parse: str) -> str:
+    """Bytes -> the text shown for a result (hex original / ASCII text such as a VIN / big-endian decimal)."""
+    if parse == "ascii":
+        return "".join(chr(b) if 32 <= b < 127 else "." for b in raw).strip()
+    if parse == "dec":
+        return str(int.from_bytes(raw, "big")) if raw else ""
+    return fmt_hex(raw)
+
+
 def extract_result(ex: Executor, replies: Dict[int, bytes]) -> Optional[str]:
-    """The text shown for an executor: the chosen step's reply without the echoed header, as hex.
-    None when that step produced no positive reply."""
+    """The text shown for an executor: the chosen step's reply without the echoed header, rendered per
+    result.parse (hex by default).  None when that step produced no positive reply."""
+    raw = extract_raw(ex, replies)
+    return None if raw is None else render_result(raw, str(ex.result.get("parse", "hex")))
+
+
+def extract_raw(ex: Executor, replies: Dict[int, bytes]) -> Optional[bytes]:
+    """The result bytes (reply of the chosen step minus the echoed header); None without a positive reply."""
     steps = ex.steps
     idx = int(ex.result.get("step", -1))
     if idx < 0:
@@ -168,14 +186,15 @@ def extract_result(ex: Executor, replies: Dict[int, bytes]) -> Optional[str]:
             skip = default_skip(parse_hex(steps[idx]["pdu"]))
         except (IndexError, KeyError, ValueError):
             skip = 1
-    return fmt_hex(data[skip:])
+    return bytes(data[skip:])
 
 
 @dataclass
 class Outcome:
     ok: bool
-    text: str = ""                 # result hex ("" = nothing after the header)
+    text: str = ""                 # rendered result ("" = nothing after the header)
     error: str = ""
+    raw: bytes = b""               # the result bytes (for numeric comparisons)
 
 
 def run_executor(session: DiagSession, ex: Executor) -> Outcome:
@@ -188,8 +207,8 @@ def run_executor(session: DiagSession, ex: Executor) -> Outcome:
     ok = session.run_plan(steps)
     if not ok:
         return Outcome(False, error=session.last_error or "已取消")
-    text = extract_result(ex, session.replies)
-    return Outcome(True, text or "")
+    raw = extract_raw(ex, session.replies) or b""
+    return Outcome(True, render_result(raw, str(ex.result.get("parse", "hex"))), raw=raw)
 
 
 # --------------------------------------------------------------------------- store

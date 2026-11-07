@@ -1,0 +1,260 @@
+{
+  "format": "canvds-flow",
+  "version": 1,
+  "name": "示例流程",
+  "nodes": [
+    {
+      "id": "n1",
+      "type": "setup",
+      "enabled": true,
+      "on_fail": "stop",
+      "name": "准备",
+      "children": [
+        {
+          "id": "n2",
+          "type": "open_device",
+          "enabled": true,
+          "on_fail": "stop",
+          "name": "打开设备",
+          "device": "USBCANFD-200U",
+          "index": 0
+        },
+        {
+          "id": "n3",
+          "type": "start_channel",
+          "enabled": true,
+          "on_fail": "stop",
+          "name": "启动通道",
+          "channel": 0,
+          "cfg": {
+            "protocol": "CAN",
+            "bitrate_kbps": 500.0,
+            "data_kbps": 2000.0,
+            "fd_accel": true,
+            "listen_only": false,
+            "terminator": true
+          }
+        },
+        {
+          "id": "n4",
+          "type": "start_channel",
+          "enabled": true,
+          "on_fail": "stop",
+          "name": "启动通道",
+          "channel": 1,
+          "cfg": {
+            "protocol": "CAN",
+            "bitrate_kbps": 500.0,
+            "data_kbps": 2000.0,
+            "fd_accel": true,
+            "listen_only": false,
+            "terminator": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "n5",
+      "type": "lane",
+      "enabled": true,
+      "on_fail": "stop",
+      "name": "通道0: 诊断",
+      "channel": 0,
+      "children": [
+        {
+          "id": "n6",
+          "type": "scan",
+          "enabled": true,
+          "on_fail": "stop",
+          "name": "扫描 动力域控制器",
+          "module": "动力域控制器",
+          "fields": [
+            "code",
+            "version",
+            "date",
+            "dtc"
+          ]
+        },
+        {
+          "id": "n7",
+          "type": "function",
+          "enabled": true,
+          "on_fail": "continue",
+          "name": "读故障码 动力域控制器",
+          "module": "动力域控制器",
+          "path": "故障检测"
+        },
+        {
+          "id": "n8",
+          "type": "if",
+          "enabled": true,
+          "on_fail": "stop",
+          "name": "动力域控制器 有故障码?",
+          "cond": {
+            "ref": "n6",
+            "field": "dtc",
+            "op": "gt",
+            "value": "0"
+          },
+          "then": [
+            {
+              "id": "n9",
+              "type": "function",
+              "enabled": true,
+              "on_fail": "stop",
+              "name": "清除故障 动力域控制器",
+              "module": "动力域控制器",
+              "path": "清除故障"
+            }
+          ],
+          "else": []
+        },
+        {
+          "id": "n10",
+          "type": "uds",
+          "enabled": true,
+          "on_fail": "stop",
+          "name": "复位 动力域控制器",
+          "module": "动力域控制器",
+          "pdu": "11 01",
+          "pre_session": false,
+          "skip": -1,
+          "parse": "hex"
+        },
+        {
+          "id": "n11",
+          "type": "delay",
+          "enabled": true,
+          "on_fail": "stop",
+          "name": "等待 3 秒",
+          "seconds": 3.0
+        },
+        {
+          "id": "n12",
+          "type": "function",
+          "enabled": true,
+          "on_fail": "stop",
+          "name": "复位后重读故障码 动力域控制器",
+          "module": "动力域控制器",
+          "path": "故障检测"
+        },
+        {
+          "id": "n13",
+          "type": "scan",
+          "enabled": true,
+          "on_fail": "stop",
+          "name": "扫描 驱动电机控制器",
+          "module": "驱动电机控制器",
+          "fields": [
+            "code",
+            "version",
+            "date",
+            "dtc"
+          ]
+        },
+        {
+          "id": "n14",
+          "type": "function",
+          "enabled": true,
+          "on_fail": "continue",
+          "name": "读故障码 驱动电机控制器",
+          "module": "驱动电机控制器",
+          "path": "故障检测"
+        },
+        {
+          "id": "n15",
+          "type": "if",
+          "enabled": true,
+          "on_fail": "stop",
+          "name": "驱动电机控制器 有故障码?",
+          "cond": {
+            "ref": "n13",
+            "field": "dtc",
+            "op": "gt",
+            "value": "0"
+          },
+          "then": [
+            {
+              "id": "n16",
+              "type": "function",
+              "enabled": true,
+              "on_fail": "stop",
+              "name": "清除故障 驱动电机控制器",
+              "module": "驱动电机控制器",
+              "path": "清除故障"
+            }
+          ],
+          "else": []
+        },
+        {
+          "id": "n17",
+          "type": "uds",
+          "enabled": true,
+          "on_fail": "stop",
+          "name": "复位 驱动电机控制器",
+          "module": "驱动电机控制器",
+          "pdu": "11 01",
+          "pre_session": false,
+          "skip": -1,
+          "parse": "hex"
+        },
+        {
+          "id": "n18",
+          "type": "delay",
+          "enabled": true,
+          "on_fail": "stop",
+          "name": "等待 3 秒",
+          "seconds": 3.0
+        },
+        {
+          "id": "n19",
+          "type": "function",
+          "enabled": true,
+          "on_fail": "stop",
+          "name": "复位后重读故障码 驱动电机控制器",
+          "module": "驱动电机控制器",
+          "path": "故障检测"
+        }
+      ]
+    },
+    {
+      "id": "n20",
+      "type": "lane",
+      "enabled": true,
+      "on_fail": "stop",
+      "name": "通道1: 周期报文",
+      "channel": 1,
+      "children": [
+        {
+          "id": "n21",
+          "type": "send",
+          "enabled": true,
+          "on_fail": "stop",
+          "name": "周期发送 0x321",
+          "key": "cyc1",
+          "can_id": "321",
+          "extended": false,
+          "fd": false,
+          "data": "01 02 03 04 05 06 07 08",
+          "period_ms": 100
+        },
+        {
+          "id": "n22",
+          "type": "delay",
+          "enabled": true,
+          "on_fail": "stop",
+          "name": "持续 15 秒",
+          "seconds": 15.0
+        },
+        {
+          "id": "n23",
+          "type": "stop_send",
+          "enabled": true,
+          "on_fail": "stop",
+          "name": "停止周期发送",
+          "key": "cyc1"
+        }
+      ]
+    }
+  ]
+}

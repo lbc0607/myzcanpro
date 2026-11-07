@@ -3,7 +3,7 @@ import copy
 from typing import Callable, Optional
 
 from zdiag.project import Project
-from zdiag.scanlib import Executor
+from zdiag.scanlib import PARSE_MODES, Executor
 from .common import info, warn
 from .flash_window import FlashEditorTab
 from .qt import QtWidgets as W
@@ -96,7 +96,7 @@ class ExecEditorPage(W.QWidget):
         self.e_skip.setFixedWidth(60)
         self.e_skip.setPlaceholderText("自动")
         self.c_parse = W.QComboBox()
-        self.c_parse.addItems(["十六进制原文"])
+        self.c_parse.addItems([t for _, t in PARSE_MODES])
         for wd in (W.QLabel("取哪一步的回复:"), self.c_step, W.QLabel("跳过开头字节数:"), self.e_skip,
                    W.QLabel("解析方式:"), self.c_parse):
             h.addWidget(wd)
@@ -132,6 +132,9 @@ class ExecEditorPage(W.QWidget):
         self.c_step.blockSignals(False)
         sk = int(self.executor.result.get("skip", -1))
         self.e_skip.setText("" if sk < 0 else str(sk))
+        modes = [k for k, _ in PARSE_MODES]
+        pm = str(self.executor.result.get("parse", "hex"))
+        self.c_parse.setCurrentIndex(modes.index(pm) if pm in modes else 0)
 
     def current(self) -> Optional[Executor]:
         """The executor as edited; None (with a message) when the result settings are invalid."""
@@ -144,7 +147,7 @@ class ExecEditorPage(W.QWidget):
             warn(self, "「跳过开头字节数」应为非负整数，或留空表示自动")
             return None
         step = self.c_step.currentData()
-        self.executor.result = {"step": -1 if step is None else step, "skip": skip, "parse": "hex"}
+        self.executor.result = {"step": -1 if step is None else step, "skip": skip, "parse": PARSE_MODES[max(self.c_parse.currentIndex(), 0)][0]}
         self.executor.name = self.e_name.text().strip() or self.executor.name
         self.executor.project.name = self.executor.name
         return self.executor

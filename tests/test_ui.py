@@ -19,6 +19,8 @@ from zdiag_ui.scan_window import ScanWindow
 from zdiag_ui.flash_window import FlashWindow, relativize
 from zdiag_ui.dialogs import CrcConfigWidget, CrcToolDialog, ServiceEditorDialog, SettingsDialog
 from zdiag_ui import qt as _qt
+from zdiag_ui.flow_window import FlowWindow
+from zdiag_ui import flow_dialog as _fd
 
 W.QApplication([])
 
@@ -513,6 +515,130 @@ class MonitorTests(Base):
     def test_launcher_button_opens_it(self):
         L = LauncherWindow(self.ctx); L._open("monitor")
         self.assertTrue(L.windows["monitor"].isVisible()); L.close_tool("monitor"); L.close()
+
+
+class FlowTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.ctx.scan_dir = tempfile.mkdtemp()
+        self.w = FlowWindow(self.ctx); self.addCleanup(self.w.close)
+        self.prep = None
+
+    def select(self, pred):
+        for r, row in enumerate(self.w.rows):
+            if pred(row):
+                self.w.table.selectRow(r); return row
+        raise KeyError
+
+    def sel_node(self, name):
+        return self.select(lambda r: r["kind"] == "node" and r["node"]["name"] == name)
+
+    def add(self, kind, setup=None):
+        """Click 添加 for `kind`; the dialog is answered by `setup(dialog)` then 确定."""
+        orig = _fd.NodeDialog.exec_
+        def fake(d):
+            if setup: setup(d)
+            d._on_ok(); return d.result is not None
+        _fd.NodeDialog.exec_ = fake
+        try:
+            self.w.c_type.setCurrentIndex(self.w.c_type.findData(kind)); self.w.b_add.click()
+        finally:
+            _fd.NodeDialog.exec_ = orig
+
+    def names(self):
+        return [r["node"]["name"] for r in self.w.rows if r["kind"] == "node"]
+
+    def test_starter_flow_and_adding_rules(self):
+        self.assertEqual(self.names(), ["准备", "打开设备", "启动通道", "通道0"])
+        W.QMessageBox.calls.clear()
+        self.sel_node("通道0"); self.add("open_device")                    # setup-only step into a lane
+        self.assertTrue(msgs("warn")); self.assertEqual(len(self.names()), 4)
+        self.sel_node("准备"); W.QMessageBox.calls.clear(); self.add("scan")
+        self.assertTrue(msgs("warn"))
+        self.sel_node("准备"); self.add("delay", lambda d: d.e_seconds.setText("0"))                   # allowed in 准备
+        self.assertEqual(self.names()[:4], ["准备", "打开设备", "启动通道", "延时"])
+        self.w.table.selectRow(-1); self.w.table._cur = -1
+        self.add("lane"); self.assertEqual(self.w.flow.lanes()[-1]["channel"], 1)                       # next free channel
+        self.assertTrue(self.w.dirty)
+
+    def build_example(self):
+        w = self.w
+        self.sel_node("通道0")
+        self.add("scan", lambda d: d.module.setCurrentIndex(0))
+        self.add("uds", lambda d: (d.c_preset.setCurrentIndex(1), d.e_name.setText("复位")))
+        self.add("delay", lambda d: d.e_seconds.setText("0.05"))
+        self.add("function", lambda d: d.c_path.setCurrentIndex(max(d.c_path.findData("故障检测"), 0)))
+        scan_id = [r["node"]["id"] for r in w.rows if r["node"]["type"] == "scan"][0]
+        self.sel_node("软件扫描")
+        self.add("if", lambda d: (d.cond.c_ref.setCurrentIndex(d.cond.c_ref.findData(scan_id)),
+                                  d.cond.c_field.setCurrentIndex(d.cond.c_field.findData("dtc")),
+                                  d.cond.c_op.setCurrentIndex(d.cond.c_op.findData("gt")), d.cond.e_val.setText("0"),
+                                  d.e_name.setText("有故障码?")))
+        self.select(lambda r: r["kind"] == "group" and r["label"] == "成立时")
+        self.add("function", lambda d: (d.c_path.setCurrentIndex(max(d.c_path.findData("清除故障"), 0)), d.e_name.setText("清除")))
+        return scan_id
+
+    def test_build_run_and_results(self):
+        w = self.w
+        self.build_example()
+        self.assertEqual(w.flow.lanes()[0]["children"][1]["name"], "有故障码?")                          # inserted after the scan
+        self.assertEqual([n["name"] for n in w.flow.lanes()[0]["children"][1]["then"]], ["清除"])
+        w.b_run.click()
+        self.assertIsNone(w.worker); self.assertTrue(w.l_status.text().startswith("✔"), w.l_status.text())
+        st = {r["node"]["name"]: w.table.cell_texts(i) for i, r in enumerate(w.rows) if r["kind"] == "node"}
+        for name in ("打开设备", "启动通道", "软件扫描", "复位", "延时", "有故障码?", "清除", "执行功能"):
+            self.assertIn("成功", st[name][3], name)
+        self.assertTrue(all(v[0] == "ok" for v in w.state.values()), w.state)
+        scan_row = st["软件扫描"]
+        self.assertIn("软件编码=", scan_row[4]); self.assertIn("故障码数量=", scan_row[4])
+        self.assertTrue(w.b_run.isEnabled() and not w.b_stop.isEnabled())
+        w.b_clear.click(); self.assertEqual(w.state, {})
+
+    def test_edit_move_duplicate_toggle_delete_save_open(self):
+        w = self.w
+        self.sel_node("通道0"); self.add("delay", lambda d: d.e_seconds.setText("1")); self.add("delay", lambda d: (d.e_seconds.setText("2"), d.e_name.setText("第二个")))
+        self.sel_node("延时"); w.b_edit.click()                                                              # stub exec_ returns 1, result None -> unchanged
+        self.sel_node("第二个"); w.b_up.click(); self.assertEqual(self.names()[-2:], ["第二个", "延时"])
+        w.b_down.click(); self.assertEqual(self.names()[-2:], ["延时", "第二个"])
+        w.b_dup.click(); self.assertEqual(self.names()[-1], "第二个 副本")
+        ids = [n["id"] for n in w.flow.walk()]; self.assertEqual(len(ids), len(set(ids)))
+        self.sel_node("第二个 副本"); w.b_toggle.click()
+        self.assertFalse(w.flow.find(w.rows[w.table.currentRow()]["node"]["id"])["enabled"])
+        self.assertIn("已禁用", w.table.cell_texts(w.table.currentRow())[0])
+        path = os.path.join(tempfile.mkdtemp(), "demo.json"); W.QFileDialog.next_path = path
+        w.b_save.click(); self.assertTrue(os.path.exists(path)); self.assertFalse(w.dirty)
+        self.sel_node("第二个 副本"); w.b_del.click(); self.assertNotIn("第二个 副本", self.names()); self.assertTrue(w.dirty)
+        W.QFileDialog.next_path = path; w.b_open.click()
+        self.assertIn("第二个 副本", self.names()); self.assertEqual(w.flow.name, "demo")
+        self.sel_node("准备"); w.b_del.click(); self.assertNotIn("准备", self.names())                      # container + children go together
+        W.QMessageBox.next_answer = W.QMessageBox.No; before = list(self.names()); w.b_new.click()            # dirty -> asked, declined
+        self.assertEqual(self.names(), before)
+        W.QMessageBox.next_answer = W.QMessageBox.Yes; w.b_new.click(); self.assertEqual(self.names()[0], "准备")
+
+    def test_invalid_flow_is_not_run_and_cond_dialog_needs_a_source(self):
+        w = self.w
+        self.sel_node("准备"); w.b_del.click(); self.sel_node("通道0"); W.QMessageBox.calls.clear()
+        self.add("if")                                                                                       # no step with a result to refer to
+        self.assertTrue(msgs("warn")); self.assertNotIn("条件分支", self.names())
+        self.add("scan", lambda d: d.module.setCurrentIndex(0))
+        w.flow.lanes()[0]["children"][0]["module"] = "不存在"; W.QMessageBox.calls.clear()
+        w.b_run.click(); self.assertTrue(msgs("warn")); self.assertIsNone(w.worker); self.assertEqual(w.state, {})
+
+    def test_stop_and_close_while_running(self):
+        w = self.w
+        self.sel_node("通道0"); self.add("delay", lambda d: d.e_seconds.setText("30"))
+        w.cancel = None; w._stop()                                                                           # no run: harmless
+        class Running:                                                                                       # pretend a run is in progress
+            def isRunning(self): return True
+            def wait(self, *a): pass
+        w.worker = Running(); import threading as _t; w.cancel = _t.Event()
+        W.QMessageBox.next_answer = W.QMessageBox.No; self.assertFalse(w.close()); self.assertFalse(w.cancel.is_set())
+        W.QMessageBox.next_answer = W.QMessageBox.Yes; self.assertTrue(w.close()); self.assertTrue(w.cancel.is_set())
+        w.worker = None
+
+    def test_tab_in_launcher(self):
+        L = LauncherWindow(self.ctx); self.addCleanup(L.close)
+        L.b_flow.click(); self.assertIn("flow", L.windows); self.assertTrue(L.close_tool("flow"))
 
 
 class ScanTests(Base):
