@@ -69,6 +69,7 @@ class DeviceManager:
         self.listeners: List[Callable[[], None]] = []
         self._lock = threading.RLock()
         self.tap = FrameTap()                    # passive monitor shared by all channels (see zdiag/monitor.py)
+        self.dispatch: Optional[Callable[[Callable[[], None]], None]] = None    # GUI: runs a listener in the GUI thread
 
     # ------------------------------------------------------------ observers
     def add_listener(self, fn) -> None:
@@ -80,9 +81,10 @@ class DeviceManager:
             self.listeners.remove(fn)
 
     def _notify(self) -> None:
+        run = self.dispatch or (lambda f: f())
         for fn in list(self.listeners):
             try:
-                fn()
+                run(fn)
             except Exception:
                 pass
 

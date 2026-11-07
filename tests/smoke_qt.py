@@ -199,6 +199,18 @@ def main() -> int:
     # --- stats / bus load on the launcher
     L.refresh_stats(); pump(timeout=0.6); L.refresh_stats()
     check("launcher shows counters", L.panels[0].l_tx.text() != "发送: 0")
+    # --- agent port inside the GUI: RPC threads change the device, the launcher must follow in the GUI thread
+    from zdiag.rpc import rpc_call
+    check("agent port starts", L.start_agent() and L.rpc is not None and L.k_agent.isChecked())
+    ep = (L.rpc.url, L.rpc.token)
+    check("agent sees the shared device", rpc_call(*ep, "status")["device"] == SIM_DEVICE)
+    r = rpc_call(*ep, "uds_request", {"channel": 0, "pdu": "22 F1 90", "parse": "ascii"})
+    check("agent uds request answered", r["ok"] and bool(r["value"]))
+    rpc_call(*ep, "channel_stop", {"channel": 1})
+    check("launcher follows an agent's channel_stop", pump(lambda: L.panels[1].l_state.text() == "未启动", 10))
+    check("agent activity shown", "channel_stop" in L.l_agent.text() or pump(lambda: "channel_stop" in L.l_agent.text(), 5))
+    L.stop_agent()
+    check("agent port stops", L.rpc is None and not L.k_agent.isChecked() and not os.path.exists(os.path.join(ctx.dir, "CanVDS_rpc.json")))
     # --- shutdown
     for k in list(L.windows):
         L.close_tool(k)

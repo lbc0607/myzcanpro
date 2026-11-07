@@ -178,6 +178,22 @@ class LauncherTests(Base):
         self.ctx.dev.shutdown()
         return LauncherWindow(self.ctx)
 
+    def test_agent_port_toggle(self):
+        from zdiag.rpc import read_endpoint, rpc_call
+        w = self._fresh_launcher()
+        self.assertEqual(w.l_agent.text(), "未开启"); self.assertFalse(w.b_agent_copy.isEnabled())
+        w.k_agent.click()                                                               # tick the box
+        self.assertIsNotNone(w.rpc, w.l_agent.text()); self.assertTrue(w.b_agent_copy.isEnabled())
+        ep = read_endpoint(self.ctx.dir); self.assertEqual(ep["url"], w.rpc.url)
+        self.assertEqual(rpc_call(ep["url"], ep["token"], "device_open", {"name": SIM_DEVICE})["device"], SIM_DEVICE)
+        self.assertTrue(self.ctx.dev.is_open); self.assertIn("已打开", w.l_dev_state.text())      # launcher follows
+        self.assertIn("device_open", w.l_agent.text())
+        W.QMessageBox.calls.clear()
+        w2 = LauncherWindow(self.ctx); w2.k_agent.setChecked(True); self.assertFalse(w2.start_agent())   # a second GUI is refused
+        self.assertTrue(msgs("warn")); self.assertFalse(w2.k_agent.isChecked())
+        w.stop_agent(); self.assertIsNone(w.rpc); self.assertIsNone(read_endpoint(self.ctx.dir)); self.assertEqual(w.l_agent.text(), "未开启")
+        w.k_agent.setChecked(True); w.start_agent(); w.close(); self.assertIsNone(read_endpoint(self.ctx.dir))   # closing stops it
+
     def test_device_toggle_and_channel_panels(self):
         w = self._fresh_launcher()
         self.assertEqual((w.b_device.text(), w.c_device.isEnabled(), w.panels), ("打开", True, []))

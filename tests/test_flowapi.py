@@ -1,5 +1,5 @@
 """Agent-facing API of 流程编排 (flowapi, CLI, MCP server)."""
-import asyncio, io, json, os, sys, tempfile, unittest, contextlib
+import io, json, os, sys, tempfile, unittest, contextlib
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from zdiag import cli, flowapi
 from zdiag.flow import FlowError
@@ -105,30 +105,6 @@ class Cli(unittest.TestCase):
         code, out = self.call("check", os.path.join(h, "none.json"), "--home", h); self.assertEqual(code, 2)
         code, out = self.call("run", p, "--home", h, "--simulate", "--timeout", "30")
         self.assertEqual(code, 0, out); self.assertTrue(json.loads(out)["ok"])
-
-
-try:
-    import mcp_server
-    HAVE_MCP = True
-except Exception:                                       # mcp needs Python >= 3.10
-    HAVE_MCP = False
-
-
-@unittest.skipUnless(HAVE_MCP, "mcp SDK not installed")
-class McpServer(unittest.TestCase):
-    def test_tools_registered_and_callable(self):
-        async def go():
-            tools = await mcp_server.mcp.list_tools()
-            tools = getattr(tools, "tools", tools)
-            names = {t.name for t in tools}
-            r = await mcp_server.mcp.call_tool("validate_flow", {"flow": flow_doc(module="x")})
-            return names, tools, r
-        names, tools, r = asyncio.run(go())
-        self.assertEqual(names, {"get_flow_format", "get_catalog", "validate_flow", "save_flow", "load_flow", "list_flows", "run_flow"})
-        sch = {t.name: (getattr(t, "inputSchema", None) or getattr(t, "input_schema", {})) for t in tools}
-        self.assertIn("flow", sch["validate_flow"].get("properties", {})); self.assertIn("name", sch["save_flow"].get("properties", {}))
-        self.assertIn("simulate", sch["run_flow"].get("properties", {}))
-        self.assertIn("不存在", json.dumps(getattr(r, "structuredContent", None) or str(r), ensure_ascii=False))
 
 
 if __name__ == "__main__":

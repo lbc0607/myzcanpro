@@ -8,7 +8,16 @@ from zdiag.project import DEVICES
 from zdiag.seedkey import SERIAL_STATE
 from .appctx import AppContext
 from .common import warn
-from .qt import Qt, QtCore, QtWidgets as W
+from .qt import Qt, QtCore, QtWidgets as W, Signal
+
+
+class _Marshal(QtCore.QObject):
+    """Runs a callable in the GUI thread (queued when emitted from another thread)."""
+    run = Signal(object)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.run.connect(lambda f: f())
 
 
 class ChannelPanel(W.QFrame):
@@ -76,6 +85,10 @@ class LauncherWindow(W.QMainWindow):
     def __init__(self, ctx: AppContext) -> None:
         super().__init__()
         self.ctx = ctx
+        self.marshal = _Marshal()
+        self.ctx.dev.dispatch = lambda fn: self.marshal.run.emit(fn)      # device listeners touch widgets: never off-thread
+        self.ops = None              # operations layer + local port for agents (off until the user switches it on)
+        self.rpc = None
         self.windows = {}            # tool key -> widget (docked in a tab or inside a FloatHost)
         self.floating = {}           # tool key -> FloatHost
         self.setWindowTitle("CanVDS")
@@ -111,6 +124,7 @@ class LauncherWindow(W.QMainWindow):
         home = W.QWidget()
         v = W.QVBoxLayout(home)
         self._build_device_panel(v)
+        self._build_agent_panel(v)
         self.l_info = W.QLabel("")
         v.addWidget(self.l_info)
         v.addStretch(1)
@@ -160,6 +174,67 @@ class LauncherWindow(W.QMainWindow):
         self._clock.timeout.connect(self.refresh_stats)
         self._clock.start(100)
         self._refresh_device()
+
+    # ------------------------------------------------------------------ agent port (MCP)
+    def _build_agent_panel(self, v) -> None:
+        g = W.QGroupBox("Agent 接口（MCP）")
+        gl = W.QVBoxLayout(g)
+        self.k_agent = W.QCheckBox("允许 agent 通过本机端口操作 CanVDS（共用当前设备和设置；仅本机、带令牌；每次启动需重新开启）")
+        self.l_agent = W.QLabel("未开启")
+        self.b_agent_copy = W.QPushButton("复制连接信息")
+        self.b_agent_copy.setEnabled(False)
+        row = W.QHBoxLayout()
+        row.addWidget(self.l_agent, 1)
+        row.addWidget(self.b_agent_copy)
+        gl.addWidget(self.k_agent)
+        gl.addLayout(row)
+        v.addWidget(g)
+        self.k_agent.toggled.connect(self._toggle_agent)
+        self.b_agent_copy.clicked.connect(self._copy_agent)
+
+    def _toggle_agent(self, checked: bool = False) -> None:
+        if checked:
+            self.start_agent()
+        else:
+            self.stop_agent()
+
+    def start_agent(self) -> bool:
+        from zdiag.ops import Ops
+        from zdiag.rpc import RpcServer
+        if self.rpc is not None:
+            return True
+        ops = Ops(self.ctx)
+        try:
+            srv = RpcServer(ops, self.ctx.dir, on_call=lambda m, ok: self.marshal.run.emit(lambda: self._agent_seen(m, ok)))
+            srv.start()
+        except (RuntimeError, OSError, ValueError) as e:
+            self.k_agent.setChecked(False)
+            warn(self, f"无法开启 agent 接口: {e}")
+            return False
+        self.ops, self.rpc = ops, srv
+        self.l_agent.setText(f"已开启: {srv.url}   （连接信息见 {os.path.join(self.ctx.dir, 'CanVDS_rpc.json')}）")
+        self.k_agent.setChecked(True)
+        self.b_agent_copy.setEnabled(True)
+        return True
+
+    def stop_agent(self) -> None:
+        if self.rpc is None:
+            return
+        self.rpc.stop()
+        self.ops.shutdown()                                 # stops cyclic senders / keep-alives / flows the agent started
+        self.ops = self.rpc = None
+        self.k_agent.setChecked(False)
+        self.b_agent_copy.setEnabled(False)
+        self.l_agent.setText("未开启")
+
+    def _agent_seen(self, method: str, ok: bool) -> None:
+        if self.rpc is not None:
+            self.l_agent.setText(f"已开启: {self.rpc.url}   最近操作: {method}{'' if ok else '（失败）'}")
+
+    def _copy_agent(self) -> None:
+        if self.rpc is not None:
+            import json
+            W.QApplication.clipboard().setText(json.dumps({"CANVDS_URL": self.rpc.url, "CANVDS_TOKEN": self.rpc.token}))
 
     def _toggle_device(self) -> None:
         dev = self.ctx.dev
@@ -353,6 +428,8 @@ class LauncherWindow(W.QMainWindow):
                 event.ignore()
                 return
         self._clock.stop()
+        self.stop_agent()
+        self.ctx.dev.dispatch = None
         SERIAL_STATE.cleanup()                         # delete EcuSerialNum.txt again
         self.ctx.dev.shutdown()
         self.ctx.save()

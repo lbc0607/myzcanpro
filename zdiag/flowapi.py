@@ -60,8 +60,8 @@ enabled(默认true), on_fail("stop"=失败即中止本泳道(默认) | "continue
     "then":[{"id":"clr","type":"uds","name":"清除","module":"<模块名>","pdu":"14 FF FF FF"}],"else":[]},
    {"id":"w","type":"delay","name":"等待","seconds":3}]}]}
 
-使用步骤: 1) get_catalog 看本机有哪些模块/功能 2) 写流程 3) validate_flow 校验并按错误修改 4) save_flow 保存 5) 用户在 CanVDS「流程编排」里打开，或 run_flow 无界面执行。
-注意: run_flow 会真实操作设备/总线，且与 CanVDS 界面互斥(同一设备只能被一个程序打开)；执行前先用 simulate=true 在模拟ECU上试跑，真机执行前务必征得用户同意。
+使用步骤: 1) get_catalog 看本机有哪些模块/功能 2) 写流程 3) validate_flow 校验并按错误修改 4) save_flow 保存 5) 用户在 CanVDS「流程编排」里打开，或 run_flow 直接执行。
+注意: run_flow 使用 CanVDS 当前打开的设备（与界面共用）；它会真实操作设备/总线，先用 simulate=true 在模拟ECU上试跑，真机执行前务必征得用户同意。
 """ % {"sim": SIM_DEVICE, "maxd": MAX_DELAY_S, "maxl": MAX_LOOP}
 
 

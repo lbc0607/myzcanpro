@@ -1,21 +1,24 @@
-"""CanVDS 流程编排 MCP server (stdio).  Lets any MCP-capable agent build, validate, save and run flows.
+"""CanVDS MCP server (stdio): lets any MCP-capable agent operate the host - devices / channels, UDS, raw frames, monitor,
+settings, 软件扫描, and the 流程编排 flows (write, validate, save, run).
 
     pip install -r requirements-mcp.txt          (Python >= 3.10)
     python mcp_server.py
 
-Environment:
-    CANVDS_HOME    folder with scan_data/ (default: this folder)
-    CANVDS_FLOW_DIR  where flows are saved (default: <CANVDS_HOME>/flows)
-    CANVDS_PYTHON  interpreter used by run_flow (default: this one).  Point it at the 32-bit Python that can load
-                   zlgcan.dll when this server itself runs on a 64-bit / newer Python.
-"""
+The server is a thin bridge to the CanVDS local port (zdiag.rpc).  It uses, in this order:
+  1. CANVDS_URL + CANVDS_TOKEN            an explicit endpoint
+  2. <CANVDS_HOME>/CanVDS_rpc.json        written by a running CanVDS window (设置 → 允许 agent 连接) or `python -m zdiag.daemon`
+  3. a headless daemon it starts itself    (set CANVDS_AUTOSTART=0 to forbid that)
+Environment: CANVDS_HOME (folder with scan_data/, default: this folder), CANVDS_FLOW_DIR (flows, default <HOME>/flows),
+CANVDS_PYTHON (interpreter for the auto-started daemon: the 32-bit Python that can load zlgcan.dll)."""
+import asyncio
+import atexit
 import functools
 import json
 import os
 import subprocess
 import sys
-import tempfile
-from typing import Any, Dict, Optional, Union
+import time
+from typing import Any, Dict, List, Optional, Union
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -23,17 +26,72 @@ os.environ.setdefault("CANVDS_HOME", HERE)
 
 from zdiag import flowapi                                  # noqa: E402
 from zdiag.flow import FlowError                           # noqa: E402
+from zdiag.rpc import RpcError, ping, read_endpoint, rpc_call   # noqa: E402
 
 try:
     from mcp.server.mcpserver import MCPServer             # mcp >= 2
 except ImportError:                                        # mcp 1.x
     from mcp.server.fastmcp import FastMCP as MCPServer    # type: ignore
 
-mcp = MCPServer("canvds-flow", instructions=(
-    "Build CanVDS diagnostic flows. Call get_flow_format and get_catalog first, write the flow JSON, fix it with "
-    "validate_flow until ok, then save_flow. run_flow touches real hardware unless simulate=true: ask the user first."))
+mcp = MCPServer("canvds", instructions=(
+    "Operate the CanVDS diagnostic host. Typical order: get_status → device_open (模拟ECU(测试) for a dry run) → channel_start → "
+    "uds_request / scan_module / send_frame / monitor_* . For multi-step jobs write a flow (get_flow_format, get_catalog, "
+    "validate_flow, save_flow, run_flow). Everything except the simulator acts on the REAL vehicle / bus: ask the user before "
+    "writing (write_did, clear_dtc, ecu_reset, security_unlock, send_frame, cyclic_start, set_settings, run_flow on real devices)."))
 
 FlowArg = Union[Dict[str, Any], str]
+_daemon: Optional[subprocess.Popen] = None
+
+
+# --------------------------------------------------------------------------- connection to CanVDS
+def _home() -> str:
+    return flowapi.home_dir()
+
+
+def _endpoint() -> Dict[str, str]:
+    global _daemon
+    if os.environ.get("CANVDS_URL") and os.environ.get("CANVDS_TOKEN"):
+        return {"url": os.environ["CANVDS_URL"], "token": os.environ["CANVDS_TOKEN"]}
+    e = read_endpoint(_home())
+    if e and ping(e["url"]):
+        return e
+    if os.environ.get("CANVDS_AUTOSTART", "1") == "0":
+        raise RpcError("没有运行中的 CanVDS 接口：请在 CanVDS 界面里开启「允许 agent 连接」，或运行 python -m zdiag.daemon")
+    if _daemon is None or _daemon.poll() is not None:
+        _daemon = subprocess.Popen([os.environ.get("CANVDS_PYTHON") or sys.executable, "-m", "zdiag.daemon", "--home", _home()],
+                                   cwd=HERE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    for _ in range(150):
+        e = read_endpoint(_home())
+        if e and ping(e["url"]):
+            return e
+        if _daemon.poll() is not None:
+            raise RpcError("自动启动 CanVDS daemon 失败: " + (_daemon.stderr.read().decode("utf-8", "replace")[-800:] or "未知原因"))
+        time.sleep(0.1)
+    raise RpcError("等待 CanVDS daemon 启动超时")
+
+
+@atexit.register
+def _stop_daemon() -> None:
+    if _daemon is not None and _daemon.poll() is None:
+        _daemon.terminate()
+        try:
+            _daemon.wait(10)
+        except Exception:
+            _daemon.kill()
+
+
+def _call_sync(method: str, params: Dict[str, Any], timeout: float = 180.0) -> Dict[str, Any]:
+    p = {k: v for k, v in params.items() if v is not None}
+    try:
+        e = _endpoint()
+        return rpc_call(e["url"], e["token"], method, p, timeout)
+    except RpcError as ex:
+        return {"ok": False, "error": str(ex)}
+
+
+async def call(method: str, **params: Any) -> Dict[str, Any]:
+    timeout = 180.0 + float(params.get("seconds") or 0)
+    return await asyncio.to_thread(_call_sync, method, params, timeout)
 
 
 def _guard(fn):
@@ -46,16 +104,17 @@ def _guard(fn):
     return w
 
 
+# --------------------------------------------------------------------------- flows: write / validate / save
 @mcp.tool()
 def get_flow_format() -> str:
-    """Describe the flow JSON format (structure, node types and fields, conditions) with an example. Read this first."""
+    """Describe the flow JSON format (structure, node types and fields, conditions) with an example. Read this before writing a flow."""
     return flowapi.FORMAT_DOC
 
 
 @mcp.tool()
 @_guard
 def get_catalog() -> Dict[str, Any]:
-    """List what exists on this machine: ECU modules and their functions, scan fields, devices, operators, limits.
+    """List what exists on this machine for flows: ECU modules and their functions, scan fields, devices, operators, limits.
     Flows may only reference module / function names listed here."""
     return flowapi.catalog()
 
@@ -89,37 +148,235 @@ def list_flows() -> Dict[str, Any]:
     return {"flows": flowapi.list_flows()}
 
 
+# --------------------------------------------------------------------------- flows: run
 @mcp.tool()
-@_guard
-def run_flow(name: str = "", flow: Optional[FlowArg] = None, simulate: bool = False, timeout_s: float = 300.0) -> Dict[str, Any]:
-    """Execute a flow without the GUI and return every step's result. Give a saved `name` or a `flow` object.
-    simulate=true replaces 打开设备 with the simulated ECU (safe dry run). Without it the flow operates the REAL
-    device and bus (and excludes the CanVDS window from using it): get the user's consent first. Blocks until done."""
-    if flow is None:
-        flow = flowapi.load(name)["flow"]
-    elif isinstance(flow, str):
-        flow = json.loads(flow)
-    fd, tmp = tempfile.mkstemp(suffix=".json", prefix="canvds_run_")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(flow, f, ensure_ascii=False)
-        cmd = [os.environ.get("CANVDS_PYTHON") or sys.executable, "-m", "zdiag.cli", "run", tmp,
-               "--timeout", str(timeout_s)] + (["--simulate"] if simulate else [])
-        env = dict(os.environ, PYTHONIOENCODING="utf-8")
+async def run_flow(name: str = "", flow: Optional[FlowArg] = None, simulate: bool = False, wait_s: float = 60.0) -> Dict[str, Any]:
+    """Run a saved flow (`name`) or a `flow` object on the shared device and wait up to wait_s seconds for it to finish; if it is
+    still running the current state is returned - poll flow_status. simulate=true replaces 打开设备 with the simulated ECU
+    (safe dry run). Without it the flow operates the REAL device and bus: get the user's consent first."""
+    if isinstance(flow, str):
         try:
-            p = subprocess.run(cmd, cwd=HERE, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout_s + 60)
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "error": "执行超时，子进程已被终止"}
-        out = p.stdout.decode("utf-8", "replace")
-        try:
-            return json.loads(out)
-        except ValueError:
-            return {"ok": False, "error": "执行进程没有返回结果", "stderr": p.stderr.decode("utf-8", "replace")[-1500:]}
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+            flow = json.loads(flow)
+        except ValueError as e:
+            return {"ok": False, "error": f"flow 不是有效的 JSON: {e}"}
+    r = await call("flow_start", flow=flow, name=name or None, simulate=simulate or None)
+    if r.get("error") or not r.get("started", False):
+        return r
+    end = time.time() + max(0.0, min(float(wait_s), 600.0))
+    while True:
+        st = await call("flow_status")
+        if st.get("state") != "running" or time.time() >= end:
+            return st
+        await asyncio.sleep(0.3)
+
+
+@mcp.tool()
+async def flow_status() -> Dict[str, Any]:
+    """State of the running / last flow: per-step state and returned text, failed steps."""
+    return await call("flow_status")
+
+
+@mcp.tool()
+async def stop_flow() -> Dict[str, Any]:
+    """Stop the running flow."""
+    return await call("flow_stop")
+
+
+# --------------------------------------------------------------------------- device / channels
+@mcp.tool()
+async def get_status() -> Dict[str, Any]:
+    """Current device, started channels (config, rx/tx/error counts, bus load), running cyclic senders, recording state."""
+    return await call("status")
+
+
+@mcp.tool()
+async def device_list() -> Dict[str, Any]:
+    """Supported devices (incl. the simulator '模拟ECU(测试)') with channel counts, and the current state."""
+    return await call("device_list")
+
+
+@mcp.tool()
+async def device_open(name: str, index: int = 0) -> Dict[str, Any]:
+    """Open a CAN device (a real one needs zlgcan.dll next to the program). Use the simulator for a dry run."""
+    return await call("device_open", name=name, index=index)
+
+
+@mcp.tool()
+async def device_close() -> Dict[str, Any]:
+    """Stop all channels and close the device."""
+    return await call("device_close")
+
+
+@mcp.tool()
+async def channel_start(channel: int, protocol: str = "CAN", bitrate_kbps: float = 500.0, data_kbps: float = 2000.0,
+                        fd_accel: bool = True, listen_only: bool = False, terminator: bool = True) -> Dict[str, Any]:
+    """Start a channel. protocol "CAN" | "CAN FD"; fd_accel=false runs the whole CAN FD frame at the arbitration rate (no BRS)."""
+    return await call("channel_start", channel=channel, protocol=protocol, bitrate_kbps=bitrate_kbps, data_kbps=data_kbps,
+                      fd_accel=fd_accel, listen_only=listen_only, terminator=terminator)
+
+
+@mcp.tool()
+async def channel_stop(channel: int) -> Dict[str, Any]:
+    """Stop a channel (also stops its cyclic senders)."""
+    return await call("channel_stop", channel=channel)
+
+
+# --------------------------------------------------------------------------- diagnostics
+@mcp.tool()
+async def uds_request(channel: int, pdu: str, module: str = "", phys: str = "", resp: str = "", func: str = "",
+                      extended: Optional[bool] = None, addr: str = "phys", suppress: bool = False, parse: str = "hex") -> Dict[str, Any]:
+    """Send one UDS request (hex PDU such as '22 F1 90') and return the response: ok, data, value (payload after the echoed
+    header, parse = hex | ascii | dec), or nrc / nrc_text / error. Also returns the request/response log lines.
+    Addressing: module = a 软件模块 name from list_modules (uses its addresses); or phys/resp/func = hex CAN IDs;
+    default = the global diag settings."""
+    return await call("uds_request", channel=channel, pdu=pdu, module=module or None, phys=phys or None, resp=resp or None,
+                      func=func or None, extended=extended, addr=addr, suppress=suppress or None, parse=parse)
+
+
+@mcp.tool()
+async def read_did(channel: int, did: str, module: str = "", parse: str = "hex") -> Dict[str, Any]:
+    """Read a data identifier (22), e.g. did='F190' with parse='ascii' for the VIN."""
+    return await call("did_read", channel=channel, did=did, module=module or None, parse=parse)
+
+
+@mcp.tool()
+async def write_did(channel: int, did: str, data: str, module: str = "") -> Dict[str, Any]:
+    """Write a data identifier (2E) with hex data. Changes the ECU: ask the user first."""
+    return await call("did_write", channel=channel, did=did, data=data, module=module or None)
+
+
+@mcp.tool()
+async def read_dtc(channel: int, module: str = "", mask: str = "08") -> Dict[str, Any]:
+    """Read DTCs by status mask (19 02): returns the list `dtcs` and `count`."""
+    return await call("dtc_read", channel=channel, module=module or None, mask=mask)
+
+
+@mcp.tool()
+async def clear_dtc(channel: int, module: str = "", group: str = "FF FF FF") -> Dict[str, Any]:
+    """Clear DTCs (14). Changes the ECU: ask the user first."""
+    return await call("dtc_clear", channel=channel, module=module or None, group=group)
+
+
+@mcp.tool()
+async def ecu_reset(channel: int, module: str = "", kind: str = "01") -> Dict[str, Any]:
+    """ECU reset (11). Restarts the ECU: ask the user first."""
+    return await call("ecu_reset", channel=channel, module=module or None, kind=kind)
+
+
+@mcp.tool()
+async def session_control(channel: int, session: str = "03", module: str = "") -> Dict[str, Any]:
+    """Diagnostic session control (10): 01 default, 02 programming, 03 extended."""
+    return await call("session_control", channel=channel, session=session, module=module or None)
+
+
+@mcp.tool()
+async def security_unlock(channel: int, dll: str, level: int = 1, module: str = "") -> Dict[str, Any]:
+    """Security access (27 seed/key) with a key DLL path ('builtin:xor' = demo algorithm). Uses the global security settings."""
+    return await call("security_unlock", channel=channel, dll=dll, level=level, module=module or None)
+
+
+@mcp.tool()
+async def keepalive_start(channel: int, module: str = "", period_ms: int = 2000, addr: str = "func", suppress: bool = True) -> Dict[str, Any]:
+    """Keep sending Tester Present (3E) until keepalive_stop."""
+    return await call("keepalive_start", channel=channel, module=module or None, period_ms=period_ms, addr=addr, suppress=suppress)
+
+
+@mcp.tool()
+async def keepalive_stop(channel: int = -1) -> Dict[str, Any]:
+    """Stop Tester Present (all channels when channel=-1)."""
+    return await call("keepalive_stop", channel=channel)
+
+
+@mcp.tool()
+async def list_modules() -> Dict[str, Any]:
+    """The 软件模块 of this machine (name, addresses, saved functions) and the scan fields."""
+    return await call("modules")
+
+
+@mcp.tool()
+async def scan_module(channel: int, module: str, fields: Optional[List[str]] = None) -> Dict[str, Any]:
+    """软件扫描 of one module: code (软件编码), version, date (硬件版本), dtc (故障码数量). fields = subset, default all."""
+    return await call("scan", channel=channel, module=module, fields=fields)
+
+
+@mcp.tool()
+async def run_function(channel: int, module: str, path: str) -> Dict[str, Any]:
+    """Run a saved 功能 of a module (see list_modules), e.g. path='故障检测'. May change the ECU (e.g. '清除故障')."""
+    return await call("function_run", channel=channel, module=module, path=path)
+
+
+# --------------------------------------------------------------------------- raw frames / monitor
+@mcp.tool()
+async def send_frame(channel: int, can_id: str, data: str = "", extended: bool = False, fd: bool = False, remote: bool = False,
+                     count: int = 1, interval_ms: int = 0) -> Dict[str, Any]:
+    """Send a raw CAN / CAN FD frame `count` times (blocking, at most 120 s). can_id and data are hex. Acts on the real bus."""
+    return await call("frame_send", channel=channel, can_id=can_id, data=data, extended=extended, fd=fd, remote=remote,
+                      count=count, interval_ms=interval_ms)
+
+
+@mcp.tool()
+async def cyclic_start(channel: int, key: str, can_id: str, data: str = "", period_ms: int = 100, extended: bool = False,
+                       fd: bool = False, count: int = -1) -> Dict[str, Any]:
+    """Send a frame every period_ms in the background; count -1 = until cyclic_stop. `key` names it. Acts on the real bus."""
+    return await call("cyclic_start", channel=channel, key=key, can_id=can_id, data=data, period_ms=period_ms, extended=extended,
+                      fd=fd, count=count)
+
+
+@mcp.tool()
+async def cyclic_stop(key: str = "") -> Dict[str, Any]:
+    """Stop one cyclic sender (or all when key is empty); returns how many frames were sent."""
+    return await call("cyclic_stop", key=key)
+
+
+@mcp.tool()
+async def monitor_trace(count: int = 100, ids: str = "", channel: int = -1, direction: str = "") -> Dict[str, Any]:
+    """The last `count` frames seen on the bus (TX and RX, chronological). ids = hex IDs separated by space; direction TX | RX."""
+    return await call("monitor_trace", count=count, ids=ids, channel=channel, direction=direction)
+
+
+@mcp.tool()
+async def monitor_snapshot(ids: str = "", channel: int = -1) -> Dict[str, Any]:
+    """One row per (channel, direction, ID): last data, frame count and period in ms."""
+    return await call("monitor_snapshot", ids=ids, channel=channel)
+
+
+@mcp.tool()
+async def monitor_capture(seconds: float = 1.0, ids: str = "", channel: int = -1, direction: str = "", limit: int = 500) -> Dict[str, Any]:
+    """Wait `seconds` (<= 60) and return the frames that arrived in that time."""
+    return await call("monitor_capture", seconds=seconds, ids=ids, channel=channel, direction=direction, limit=limit)
+
+
+@mcp.tool()
+async def monitor_clear() -> Dict[str, Any]:
+    """Clear the monitor data."""
+    return await call("monitor_clear")
+
+
+@mcp.tool()
+async def record_start(name: str = "") -> Dict[str, Any]:
+    """Start saving every frame to <log folder>/<name>.csv in real time."""
+    return await call("record_start", name=name)
+
+
+@mcp.tool()
+async def record_stop() -> Dict[str, Any]:
+    """Stop the real-time recording."""
+    return await call("record_stop")
+
+
+# --------------------------------------------------------------------------- settings
+@mcp.tool()
+async def get_settings(section: str = "") -> Dict[str, Any]:
+    """Global settings: sections diag (addr, keepalive, settings = timing / padding / ...), security (serial DID / file / id_map),
+    log (folder / size / keep days), channel (fd_dl, zlgcan_dll, sim_profile). Empty section = all."""
+    return await call("settings_get", section=section)
+
+
+@mcp.tool()
+async def set_settings(section: str, values: Dict[str, Any]) -> Dict[str, Any]:
+    """Change global settings (validated, saved, shared with the CanVDS windows). diag: {"addr": {"phys": "7E3", "resp": "7EB"},
+    "settings": {"p2_ms": 500}, "keepalive": {...}}; security / log / channel: flat fields. Ask the user before changing."""
+    return await call("settings_set", section=section, values=values)
 
 
 if __name__ == "__main__":

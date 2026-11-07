@@ -82,26 +82,36 @@ ECU 刷新方案为 JSON(格式 `myzcanpro-flash`),可自由命名扩展名,各 
 - **保存 / 发给别人**：保存为 JSON 流程文件，对方「打开」后点执行即可。流程里**引用本机 `scan_data` 的模块与功能名称**，所以对方电脑上要有同名的模块/功能（打开时会检查并提示缺哪些）；密钥 DLL 等仍用对方本机设置。`examples/示例流程.json` 是按「两个模块扫描 → 读/清故障码 → 复位 → 延时 3 秒 → 重读，同时另一通道周期发送」搭好的示例。
 - 同一通道只能有一条泳道；设备已打开时「打开设备」沿用，已启动的通道沿用当前配置。
 
-## 用对话生成流程（MCP / 命令行，任何 agent 都能用）
-让 agent 看着本机有哪些模块/功能，直接生成、校验、保存、试跑流程；生成的文件在 CanVDS「流程编排 → 打开」里就能看到流程图。
+## 用对话操作 CanVDS（MCP，任何 agent 都能用）
+agent 可以不开界面完成上位机的主要操作：设备/通道、UDS 诊断、自定义报文收发与监视、全局设置、软件扫描，以及流程编排（生成、校验、保存、执行）。
 
-**MCP 服务**（标准 stdio，Claude Desktop / Claude Code / 其他支持 MCP 的 agent 通用；需要 Python ≥ 3.10）
+**架构**：所有操作都在 `zdiag/ops.py`（统一操作层，和界面共用同一个设备管理器、设置、监视）；`zdiag/rpc.py` 把它开成**仅本机回环、带随机令牌**的 HTTP 端口；`mcp_server.py` 是这个端口的薄桥接。端口有两种来源：
+1. **开在 CanVDS 界面里**：「设备管理」页的「Agent 接口」打勾（每次启动需重新打勾）。agent 和你共用同一个设备，你能在界面上实时看到 agent 的操作（设备/通道状态、报文监视、最近操作）。
+2. **无界面 daemon**：`python -m zdiag.daemon`（真机请用能加载 zlgcan.dll 的 32 位 Python）；MCP 服务发现没有端口时会自己拉起一个。
+> 同一设备只能由一个程序打开：界面和 daemon 不要同时运行（后启动的会被拒绝并提示）。
+
+**启动 MCP 服务**（标准 stdio，需 Python ≥ 3.10）
 ```
 pip install -r requirements-mcp.txt
 python mcp_server.py
 ```
 通用配置（各家客户端的 `mcpServers` 写法一致，路径改成你自己的）：
 ```json
-{"mcpServers": {"canvds-flow": {"command": "python", "args": ["D:/myzcanpro/mcp_server.py"],
+{"mcpServers": {"canvds": {"command": "python", "args": ["D:/myzcanpro/mcp_server.py"],
   "env": {"CANVDS_HOME": "D:/myzcanpro", "CANVDS_PYTHON": "D:/py38-32/python.exe"}}}}
 ```
-Claude Code 也可：`claude mcp add canvds-flow -e CANVDS_HOME=D:/myzcanpro -- python D:/myzcanpro/mcp_server.py`
+Claude Code：`claude mcp add canvds -e CANVDS_HOME=D:/myzcanpro -- python D:/myzcanpro/mcp_server.py`
 
-环境变量：`CANVDS_HOME`（放 scan_data 的文件夹，默认本仓库/exe 所在目录）、`CANVDS_FLOW_DIR`（流程保存位置，默认 `<HOME>/flows`）、`CANVDS_PYTHON`（`run_flow` 用哪个 Python 执行：连真机需要能加载 zlgcan.dll 的 32 位 Python，MCP 服务本身可以跑在别的 Python 上）。
+环境变量：`CANVDS_HOME`（放 scan_data 和配置的文件夹，默认本仓库/exe 所在目录）、`CANVDS_FLOW_DIR`（流程保存位置，默认 `<HOME>/flows`）、`CANVDS_PYTHON`（自动拉起 daemon 用的 Python）、`CANVDS_URL`+`CANVDS_TOKEN`（直接指定端口）、`CANVDS_AUTOSTART=0`（禁止自动拉起 daemon）。找端口的顺序：CANVDS_URL → `<HOME>/CanVDS_rpc.json`（界面或 daemon 写入）→ 自动拉起 daemon。
 
-工具：`get_flow_format`（格式说明+示例）、`get_catalog`（本机模块/功能/设备）、`validate_flow`（逐条错误+大纲）、`save_flow`（只写 flows/ 下，校验通过才保存）、`load_flow`、`list_flows`、`run_flow`（无界面执行并返回每步结果；`simulate=true` 先用模拟 ECU 试跑）。
+**工具（39 个）**
+- 设备/通道：`get_status` `device_list` `device_open` `device_close` `channel_start` `channel_stop`
+- UDS：`uds_request` `read_did` `write_did` `read_dtc` `clear_dtc` `ecu_reset` `session_control` `security_unlock` `keepalive_start` `keepalive_stop`
+- 软件扫描：`list_modules` `scan_module` `run_function`
+- 报文：`send_frame` `cyclic_start` `cyclic_stop` `monitor_trace` `monitor_snapshot` `monitor_capture` `monitor_clear` `record_start` `record_stop`
+- 设置：`get_settings` `set_settings`（分区 diag / security / log / channel，先校验再原地修改并保存，不合法的值一律拒绝且不改任何东西）
+- 流程：`get_flow_format` `get_catalog` `validate_flow` `save_flow` `load_flow` `list_flows` `run_flow` `flow_status` `stop_flow`（`run_flow` 的 `simulate=true` 用模拟 ECU 试跑）
 
-> ⚠ `run_flow` 不带 simulate 会真实操作设备和总线，并与 CanVDS 界面互斥（同一设备只能被一个程序打开）。工具说明里要求 agent 先征得你同意。
+**安全约定**：端口只接受本机连接（回环地址 + Host 校验 + 拒绝浏览器 Origin）并要求令牌；连接信息文件仅当前用户可读；工具说明要求 agent 在写 DID、清故障码、复位、解锁、发报文、改设置、真机执行流程前先征得你同意；刷写（ECU刷新）没有开放。`save_flow` 只能写 `flows/` 文件夹，录制只能写日志文件夹。
 
-**命令行**（不支持 MCP 的 agent 通过 shell 调用，只用标准库，32 位 Python 3.8 可用）：
-`python -m zdiag.cli format | catalog | list | check FILE | outline FILE | run FILE [--simulate] [--timeout 300]`，输出 JSON，退出码 0=成功 1=失败 2=用法/文件错误。
+**命令行**（不支持 MCP 的 agent 通过 shell 调用，只用标准库）：流程相关 `python -m zdiag.cli format | catalog | list | check FILE | outline FILE | run FILE [--simulate]`；其余操作可直接 POST 到本机端口（`POST /call {"method": "...", "params": {...}}`，头 `Authorization: Bearer <令牌>`，方法名见 `zdiag/ops.py` 的 METHODS）。
