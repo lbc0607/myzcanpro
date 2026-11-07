@@ -81,3 +81,27 @@ ECU 刷新方案为 JSON(格式 `myzcanpro-flash`),可自由命名扩展名,各 
 - **执行**：点「▶ 执行」；每个步骤按 执行中(蓝) → 成功(绿) / 失败(红) / 跳过(灰) 变色，并在右侧列显示返回信息（扫描结果、功能返回、ASCII 的 VIN、周期发送共发了多少帧……）。「■ 停止」随时中止，周期发送与通道占用会一并释放。一条泳道失败只停止它自己，其它泳道继续。
 - **保存 / 发给别人**：保存为 JSON 流程文件，对方「打开」后点执行即可。流程里**引用本机 `scan_data` 的模块与功能名称**，所以对方电脑上要有同名的模块/功能（打开时会检查并提示缺哪些）；密钥 DLL 等仍用对方本机设置。`examples/示例流程.json` 是按「两个模块扫描 → 读/清故障码 → 复位 → 延时 3 秒 → 重读，同时另一通道周期发送」搭好的示例。
 - 同一通道只能有一条泳道；设备已打开时「打开设备」沿用，已启动的通道沿用当前配置。
+
+## 用对话生成流程（MCP / 命令行，任何 agent 都能用）
+让 agent 看着本机有哪些模块/功能，直接生成、校验、保存、试跑流程；生成的文件在 CanVDS「流程编排 → 打开」里就能看到流程图。
+
+**MCP 服务**（标准 stdio，Claude Desktop / Claude Code / 其他支持 MCP 的 agent 通用；需要 Python ≥ 3.10）
+```
+pip install -r requirements-mcp.txt
+python mcp_server.py
+```
+通用配置（各家客户端的 `mcpServers` 写法一致，路径改成你自己的）：
+```json
+{"mcpServers": {"canvds-flow": {"command": "python", "args": ["D:/myzcanpro/mcp_server.py"],
+  "env": {"CANVDS_HOME": "D:/myzcanpro", "CANVDS_PYTHON": "D:/py38-32/python.exe"}}}}
+```
+Claude Code 也可：`claude mcp add canvds-flow -e CANVDS_HOME=D:/myzcanpro -- python D:/myzcanpro/mcp_server.py`
+
+环境变量：`CANVDS_HOME`（放 scan_data 的文件夹，默认本仓库/exe 所在目录）、`CANVDS_FLOW_DIR`（流程保存位置，默认 `<HOME>/flows`）、`CANVDS_PYTHON`（`run_flow` 用哪个 Python 执行：连真机需要能加载 zlgcan.dll 的 32 位 Python，MCP 服务本身可以跑在别的 Python 上）。
+
+工具：`get_flow_format`（格式说明+示例）、`get_catalog`（本机模块/功能/设备）、`validate_flow`（逐条错误+大纲）、`save_flow`（只写 flows/ 下，校验通过才保存）、`load_flow`、`list_flows`、`run_flow`（无界面执行并返回每步结果；`simulate=true` 先用模拟 ECU 试跑）。
+
+> ⚠ `run_flow` 不带 simulate 会真实操作设备和总线，并与 CanVDS 界面互斥（同一设备只能被一个程序打开）。工具说明里要求 agent 先征得你同意。
+
+**命令行**（不支持 MCP 的 agent 通过 shell 调用，只用标准库，32 位 Python 3.8 可用）：
+`python -m zdiag.cli format | catalog | list | check FILE | outline FILE | run FILE [--simulate] [--timeout 300]`，输出 JSON，退出码 0=成功 1=失败 2=用法/文件错误。

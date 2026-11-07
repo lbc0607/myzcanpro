@@ -1,0 +1,30 @@
+{
+  "format": "myzcanpro-executor",
+  "version": 1,
+  "name": "故障检测",
+  "steps": [
+    {
+      "name": "进入扩展会话",
+      "addr": "phys",
+      "pdu": "10 03",
+      "suppress": false,
+      "check": true,
+      "expect": "",
+      "type": "service"
+    },
+    {
+      "name": "读取故障码",
+      "addr": "phys",
+      "pdu": "19 02 08",
+      "suppress": false,
+      "check": true,
+      "expect": "",
+      "type": "service"
+    }
+  ],
+  "result": {
+    "step": -1,
+    "skip": 3,
+    "parse": "hex"
+  }
+}

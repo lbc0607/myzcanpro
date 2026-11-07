@@ -369,3 +369,24 @@ def scan_module(store: ScanStore, m: Module, open_session: Callable[[Module], Di
     finally:
         sess.close()
     return res
+
+
+def module_names(store: "ScanStore") -> List[str]:
+    return [m.name for m in store.modules()]
+
+
+def function_paths(store: "ScanStore", module: str) -> List[str]:
+    """Relative paths ('故障检测', '标定/零位标定') of all executors in the module's 功能 folder."""
+    for m in store.modules():
+        if m.name != module:
+            continue
+        root = store.func_dir(m)
+        out: List[str] = []
+        for d, dirs, files in os.walk(root):
+            dirs.sort()
+            for f in sorted(files):
+                if f.lower().endswith(".json"):
+                    rel = os.path.relpath(os.path.join(d, f[:-5]), root)
+                    out.append(rel.replace(os.sep, "/"))
+        return out
+    return []

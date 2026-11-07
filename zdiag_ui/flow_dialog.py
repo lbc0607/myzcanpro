@@ -7,7 +7,7 @@ from zdiag.busstats import ChannelCfg
 from zdiag.devmgr import is_fd_device
 from zdiag.flow import (LOOP_MODES, MAX_CHANNEL, NEEDS_VALUE, OPS, TYPE_LABEL, Flow, cond_text, walk)
 from zdiag.project import DEVICES, parse_hex, parse_id
-from zdiag.scanlib import INFO_FIELDS, PARSE_MODES, ScanStore
+from zdiag.scanlib import INFO_FIELDS, PARSE_MODES, ScanStore, function_paths, module_names
 from .common import warn
 from .qt import QtWidgets as W
 
@@ -15,27 +15,6 @@ PRESETS = [("(自定义)", "", ""), ("ECU复位 (硬复位)", "11 01", "ECU复�
            ("读故障码", "19 02 08", "读故障码"), ("清除故障码", "14 FF FF FF", "清除故障码"),
            ("读VIN (ASCII)", "22 F1 90", "读VIN")]
 RESULT_TYPES = ("scan", "function", "uds", "delay", "send", "stop_send", "open_device", "start_channel")
-
-
-def module_names(store: ScanStore) -> List[str]:
-    return [m.name for m in store.modules()]
-
-
-def function_paths(store: ScanStore, module: str) -> List[str]:
-    """Relative paths ('故障检测', '标定/零位标定') of all executors in the module's 功能 folder."""
-    for m in store.modules():
-        if m.name != module:
-            continue
-        root = store.func_dir(m)
-        out: List[str] = []
-        for d, dirs, files in os.walk(root):
-            dirs.sort()
-            for f in sorted(files):
-                if f.lower().endswith(".json"):
-                    rel = os.path.relpath(os.path.join(d, f[:-5]), root)
-                    out.append(rel.replace(os.sep, "/"))
-        return out
-    return []
 
 
 class CondEditor(W.QWidget):
