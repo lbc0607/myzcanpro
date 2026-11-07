@@ -599,6 +599,65 @@ class QBrush:
     def __init__(self, *a): self.a = a
 
 
+class _GItem:
+    """Graphics item recorded by QGraphicsScene: remembers brush / pen / tooltip / text."""
+    def __init__(self, kind, args):
+        self.kind, self.args, self.brush, self.pen, self.tip, self.text = kind, args, None, None, "", ""
+    def setBrush(self, b): self.brush = b
+    def setPen(self, p): self.pen = p
+    def setToolTip(self, t): self.tip = t
+    def setPos(self, *a): pass
+    def setDefaultTextColor(self, c): pass
+
+
+class QGraphicsScene:
+    def __init__(self, *a): self.items = []; self.rect = None
+    def _add(self, kind, args):
+        it = _GItem(kind, args)
+        if args and isinstance(args[0], str): it.text = args[0]
+        if kind in ("rect", "polygon", "ellipse"):
+            it.brush = next((a for a in args if isinstance(a, QBrush)), None)
+        self.items.append(it); return it
+    def addRect(self, *a): return self._add("rect", a)
+    def addLine(self, *a): return self._add("line", a)
+    def addPolygon(self, *a): return self._add("polygon", a)
+    def addEllipse(self, *a): return self._add("ellipse", a)
+    def addText(self, *a): return self._add("text", a)
+    def removeItem(self, it):
+        if it in self.items: self.items.remove(it)
+    def clear(self): self.items = []
+    def setSceneRect(self, *a): self.rect = a
+
+
+class _Pt:
+    def __init__(self, p): self.p = p
+    def x(self): return self.p[0]
+    def y(self): return self.p[1]
+
+
+class QGraphicsView(QWidget):
+    def __init__(self, scene=None, *a):
+        super().__init__()
+        self.scn = scene
+    def mapToScene(self, p): return _Pt(p)
+    def setRenderHint(self, *a): pass
+    def ensureVisible(self, *a): pass
+    def centerOn(self, *a): pass
+    def scene(self): return self.scn
+
+
+class QPen:
+    def __init__(self, *a): self.a = a
+    def setStyle(self, s): pass
+    def setWidth(self, w): pass
+
+
+class QtPoint:
+    def __init__(self, x=0, y=0): self.x_, self.y_ = x, y
+    def x(self): return self.x_
+    def y(self): return self.y_
+
+
 class _QtNS(metaclass=_Meta):
     UserRole = 256
     Checked, Unchecked, PartiallyChecked = 2, 0, 1
@@ -627,11 +686,11 @@ def _make_module(name, explicit):
 def install():
     core = _make_module("PyQt5.QtCore", dict(
         QObject=QObject, pyqtSignal=pyqtSignal, QThread=QThread, QTimer=QTimer, Qt=_QtNS,
-        QSize=_U, QPoint=_U, pyqtSlot=lambda *a, **k: (lambda f: f)))
-    gui = _make_module("PyQt5.QtGui", dict(QColor=QColor, QBrush=QBrush))
+        QSize=_U, QPoint=_U, QPointF=QtPoint, pyqtSlot=lambda *a, **k: (lambda f: f)))
+    gui = _make_module("PyQt5.QtGui", dict(QColor=QColor, QBrush=QBrush, QPen=QPen, QPolygonF=lambda pts=(): list(pts), QPainter=_U()))
     widgets = _make_module("PyQt5.QtWidgets", {
         k: v for k, v in globals().items()
-        if isinstance(v, type) and k.startswith("Q") and k not in ("QObject", "QThread", "QTimer", "QColor", "QBrush")})
+        if isinstance(v, type) and k.startswith("Q") and k not in ("QObject", "QThread", "QTimer", "QColor", "QBrush", "QPen")})
     pkg = types.ModuleType("PyQt5")
     pkg.QtCore, pkg.QtGui, pkg.QtWidgets = core, gui, widgets
     for name, mod in (("PyQt5", pkg), ("PyQt5.QtCore", core), ("PyQt5.QtGui", gui), ("PyQt5.QtWidgets", widgets)):

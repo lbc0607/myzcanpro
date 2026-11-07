@@ -107,11 +107,17 @@ def main() -> int:
     lane1["children"] += [snd, fl.make("delay", seconds=0.5), fl.make("stop_send")]
     fl.nodes.append(lane1)
     fw._render()
+    check("flowchart drawn", len(fw.view.scene().items()) > 20 and fw.view.lay.width > 0)
+    fw._pick(sc["id"]); check("flowchart click selects row", fw._cur()["node"]["id"] == sc["id"] and fw.view.selected == sc["id"])
+    img = fw.view.grab(); check("flowchart paints", not img.isNull() and img.width() > 0)
+    fw.b_view.click(); check("list view toggle", fw.stack.currentIndex() == 1)
+    fw.b_view.click()
     fw.b_run.click()
     check("flow finished", pump(lambda: fw.worker is None, 30))
     check("flow all green", fw.l_status.text().startswith("✔") and all(v[0] == "ok" for v in fw.state.values()))
     check("flow shows scan result", "软件编码=" in fw.state[sc["id"]][1])
     check("flow cyclic send counted", "共发送" in fw.state[snd["id"]][1])
+    check("flowchart box turned green", fw.view.bodies[sc["id"]].brush().color().name().lower() == "#d5f5e3")
     fw.close()
     check("flow released the channels", ctx.dev.owners == {})
     # --- 报文监视 stays open (and records) while everything below runs

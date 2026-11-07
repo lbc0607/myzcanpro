@@ -548,6 +548,29 @@ class FlowTests(Base):
     def names(self):
         return [r["node"]["name"] for r in self.w.rows if r["kind"] == "node"]
 
+    def test_flowchart_selection_edit_and_state(self):
+        v = self.w.view
+        self.assertEqual(self.w.stack.currentIndex(), 0)                       # flowchart is the default view
+        lane = [n for n in self.w.flow.walk() if n["type"] == "lane"][0]
+        v.mousePressEvent(type("E", (), {"pos": lambda s: (0, 0)})())          # empty area: no change
+        self.w._pick(lane["id"]); self.assertEqual(self.w._cur()["node"]["id"], lane["id"])
+        self.assertEqual(v.selected, lane["id"])
+        self.w._pick(lane["id"] + ":children")                                 # empty-lane placeholder selects the lane
+        self.assertEqual(self.w._cur()["node"]["id"], lane["id"])
+        self.add("delay", lambda d: d.e_seconds.setText("0"))                  # add works from a flowchart selection
+        d = [n for n in self.w.flow.walk() if n["type"] == "delay"][-1]
+        self.assertEqual(v.selected, d["id"])
+        sh = [s for s in v.lay.shapes if s.node == d["id"]][0]
+        v.mousePressEvent(type("E", (), {"pos": lambda s: (sh.x + 5, sh.y + 5)})())
+        self.assertEqual(self.w._cur()["node"]["id"], d["id"])
+        from zdiag.flowrun import FlowEvent
+        self.w._on_event(FlowEvent(d["id"], "ok", "done"))
+        self.assertEqual(self.w.state[d["id"]][0], "ok")
+        self.assertIn("ok: done", v.bodies[d["id"]].tip)
+        self.assertEqual(v.bodies[d["id"]].brush.a[0].a[0], "#D5F5E3")
+        self.w.b_view.click(); self.assertEqual(self.w.stack.currentIndex(), 1)
+        self.w.b_view.click(); self.assertEqual(self.w.stack.currentIndex(), 0)
+
     def test_starter_flow_and_adding_rules(self):
         self.assertEqual(self.names(), ["准备", "打开设备", "启动通道", "通道0"])
         W.QMessageBox.calls.clear()

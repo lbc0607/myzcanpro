@@ -10,6 +10,7 @@ from zdiag.flowrun import CtxEnv, FlowEvent, FlowReport, FlowRunner
 from zdiag.project import SIM_DEVICE
 from .common import Worker, info, pick_file, save_file, warn
 from .flow_dialog import NodeDialog
+from .flow_view import FlowView
 from .qt import Qt, QtCore, QtGui, QtWidgets as W, Signal
 
 HEADERS = ["步骤", "类型", "参数", "状态", "结果 / 返回信息"]
@@ -62,17 +63,26 @@ class FlowWindow(W.QWidget):
             self.c_type.addItem(TYPE_LABEL[k], k)
         self.b_add, self.b_edit, self.b_del = W.QPushButton("添加"), W.QPushButton("编辑"), W.QPushButton("删除")
         self.b_up, self.b_down, self.b_dup, self.b_toggle = (W.QPushButton(t) for t in ("上移", "下移", "复制", "启用/禁用"))
+        self.b_view = W.QPushButton("切换到列表")
         bar.addWidget(W.QLabel("添加步骤:"))
         bar.addWidget(self.c_type)
         for b in (self.b_add, self.b_edit, self.b_del, self.b_up, self.b_down, self.b_dup, self.b_toggle):
             bar.addWidget(b)
         bar.addStretch(1)
+        bar.addWidget(self.b_view)
         v.addLayout(bar)
         self.table = W.QTableWidget(0, len(HEADERS))
         self.table.setHorizontalHeaderLabels(HEADERS)
         self.table.setSelectionBehavior(W.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(W.QAbstractItemView.SingleSelection)
-        v.addWidget(self.table, 1)
+        for c, w in enumerate((280, 90, 340, 90, 320)):
+            self.table.setColumnWidth(c, w)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.view = FlowView()
+        self.stack = W.QStackedWidget()
+        self.stack.addWidget(self.view)                  # 0 = 流程图 (default), 1 = 列表
+        self.stack.addWidget(self.table)
+        v.addWidget(self.stack, 1)
         self.l_status = W.QLabel("提示：先选中「通道泳道」或其中的步骤再点「添加」；每个通道一条泳道，各泳道同时执行。")
         v.addWidget(self.l_status)
         self.b_new.clicked.connect(self._new)
@@ -90,6 +100,10 @@ class FlowWindow(W.QWidget):
         self.b_dup.clicked.connect(self._duplicate)
         self.b_toggle.clicked.connect(self._toggle)
         self.table.cellDoubleClicked.connect(lambda r, c: self._edit())
+        self.table.itemSelectionChanged.connect(self._sync_view)
+        self.view.picked.connect(self._pick)
+        self.view.edited.connect(lambda k: self._edit())
+        self.b_view.clicked.connect(self._switch_view)
         self.b_stop.setEnabled(False)
 
     def _starter(self) -> None:
@@ -142,6 +156,7 @@ class FlowWindow(W.QWidget):
             if sel and self._key_of(row) == sel:
                 self.table.selectRow(r)
                 break
+        self.view.show_flow(self.flow, self.state, self._selected_key())
         self.l_name.setText(f"  {self.flow.name}{' *' if self.dirty else ''}  {os.path.basename(self.path) if self.path else '(未保存)'}")
 
     def _paint(self, r: int, st, node: dict) -> None:
@@ -161,6 +176,22 @@ class FlowWindow(W.QWidget):
     def _selected_key(self) -> str:
         r = self.table.currentRow()
         return self._key_of(self.rows[r]) if 0 <= r < len(self.rows) else ""
+
+    def _sync_view(self) -> None:
+        self.view.select(self._selected_key())
+
+    def _pick(self, key: str) -> None:
+        """A shape was clicked in the flowchart: select the matching row (a list placeholder selects its owner)."""
+        for cand in (key, key.split(":")[0]):
+            for r, row in enumerate(self.rows):
+                if self._key_of(row) == cand:
+                    self.table.selectRow(r)
+                    return
+
+    def _switch_view(self) -> None:
+        graph = self.stack.currentIndex() == 0
+        self.stack.setCurrentIndex(1 if graph else 0)
+        self.b_view.setText("切换到流程图" if graph else "切换到列表")
 
     def _cur(self) -> Optional[dict]:
         r = self.table.currentRow()
@@ -385,6 +416,7 @@ class FlowWindow(W.QWidget):
             self.state.pop(e.node, None)
         else:
             self.state[e.node] = (e.state, e.text)
+        self.view.set_state(e.node, self.state.get(e.node))
         for r, row in enumerate(self.rows):
             if row["kind"] == "node" and row["node"]["id"] == e.node:
                 st = self.state.get(e.node)
