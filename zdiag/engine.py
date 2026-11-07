@@ -159,7 +159,7 @@ def segments_for(path: str, base_addr: str = "0") -> List[Segment]:
 # --------------------------------------------------------------------------- session
 class DiagSession:
     def __init__(self, bus: Bus, cfg: DiagConfig, hooks: Optional[Hooks] = None,
-                 base_dir: str = ".", can_fd: bool = False, fd_dl: int = 64,
+                 base_dir: str = ".", can_fd: bool = False, fd_dl: int = 64, brs: bool = True,
                  cancel: Optional[threading.Event] = None, security: Optional[SecurityCfg] = None, app_dir: Optional[str] = None) -> None:
         self.cfg, self.hooks, self.base_dir = cfg, hooks or Hooks(), base_dir
         self.app_dir = app_dir or base_dir                   # program folder (base of the security file's folder)
@@ -174,7 +174,7 @@ class DiagSession:
             padding=st.padding if st.padding_enabled else None,
             n_bs=st.fc_timeout_ms / 1000.0, n_cr=max(st.fc_timeout_ms / 1000.0, 1.0),
             stmin_override=(st.override_stmin_ms / 1000.0) if st.override_stmin else None,
-            auto_fc=st.auto_fc, brs=st.fd_brs)
+            auto_fc=st.auto_fc, brs=brs)
         self.uds = UdsClient(self.tp, p2=st.p2_ms / 1000.0, p2_star=st.p2star_ms / 1000.0)
         self.uds.auto_keepalive = False
         self.uds.suppress_wait = st.suppress_wait

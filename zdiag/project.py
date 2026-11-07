@@ -103,7 +103,6 @@ class Settings:
     save_max_lines: int = 100000
     show_raw: bool = False
     auto_fc: bool = True
-    fd_brs: bool = True           # CAN FD diagnostic frames carry BRS (bit-rate switch); irrelevant when both rates are equal
 
 
 @dataclass

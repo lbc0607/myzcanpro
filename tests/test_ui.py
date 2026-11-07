@@ -214,6 +214,15 @@ class LauncherTests(Base):
         self.assertEqual((p.b_toggle.text(), p.l_rx.text(), p.l_load.text()), ("启动", "接收: 0", "总线负载: --"))
         w.close()
 
+    def test_channel_dialog_accel_option(self):
+        from zdiag_ui import dialogs
+        d = dialogs.ChannelConfigDialog(SIM_DEVICE, 0, ChannelCfg(protocol="CAN FD"))
+        self.assertTrue(d.c_dbaud.isEnabled()); d.c_accel.setCurrentIndex(1); d._sync()
+        self.assertFalse(d.c_dbaud.isEnabled()); d._on_ok()
+        self.assertFalse(d.result_cfg.fd_accel)
+        d2 = dialogs.ChannelConfigDialog(SIM_DEVICE, 0, d.result_cfg)
+        self.assertEqual(d2.c_accel.currentIndex(), 1)
+
     def test_channel_stop_blocked_while_window_uses_it(self):
         from zdiag_ui import dialogs
         w = self._fresh_launcher()
@@ -411,10 +420,10 @@ class DiagWindowTests(Base):
         self.assertEqual(d.e_phys.text(), "7e2"); self.assertEqual(d.a_p2.text(), "800")
         d.a_p2.setText("1234"); d.a_pad_on.setChecked(False); d.k_on.setChecked(True); d.k_period.setText("500")
         d.a_rxpad.setText("cc"); d.t_map.setRowCount(0); d._map_row("7e2","5","6"); d._map_row("7e8","2","4"); d._map_row("", "", "")
-        d.e_sdid.setText("f1 90"); d.e_sfile.setText("Sn.txt"); d.c_sfmt.setCurrentIndex(1); d.ch_fddl.setCurrentText("32"); d.ch_sim.setCurrentIndex(1)
+        d.e_sdid.setText("f1 90"); d.e_sfile.setText("Sn.txt"); d.c_sfmt.setCurrentIndex(1); d.ch_fddl.setCurrentText("32")
         d.btn_ok.click()
         self.assertEqual((cfg.settings.p2_ms, cfg.settings.padding_enabled, cfg.keepalive.period_ms), (1234, False, 500))
-        self.assertEqual((cfg.settings.rx_padding, cfg.settings.padding), (0xCC, 0x55)); sec = self.ctx.security; self.assertEqual(sec.id_map, {"7e2": [5, 6], "7e8": [2, 4]}); self.assertEqual((sec.serial_did, sec.serial_file, sec.serial_format), ("F1 90", "Sn.txt", "hex")); self.assertEqual((ch.fd_dl, ch.sim_profile), (32, "old"))
+        self.assertEqual((cfg.settings.rx_padding, cfg.settings.padding), (0xCC, 0x55)); sec = self.ctx.security; self.assertEqual(sec.id_map, {"7e2": [5, 6], "7e8": [2, 4]}); self.assertEqual((sec.serial_did, sec.serial_file, sec.serial_format), ("F1 90", "Sn.txt", "hex")); self.assertEqual((ch.fd_dl, ch.sim_profile), (32, "new"))
         d2 = SettingsDialog(self.ctx, cfg, ch)
         d2.a_p2.setText("abc"); d2.e_phys.setText("1fff")
         W.QMessageBox.calls.clear(); d2.btn_ok.click()
@@ -568,7 +577,7 @@ class ScanTests(Base):
         w = self.w
         w.rows[0]["fields"]["code"].click()
         self.assertEqual(w.stack.currentIndex(), _sw.EDITOR)
-        self.assertEqual([s["pdu"] for s in w.editor.executor.steps], ["10 03", "22 F1 88"])
+        self.assertEqual([s["pdu"] for s in w.editor.executor.steps], ["10 03", "22 F1 95"])
         self.assertFalse(w.editor.e_name.isEnabled())
         w.editor.executor.steps[-1]["pdu"] = "22 F1 90"; w.editor.on_changed()          # the VIN example from the spec
         w.editor.run()                                                                   # 试运行

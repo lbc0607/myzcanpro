@@ -182,6 +182,23 @@ class ZlgInitSequenceTests(unittest.TestCase):
         d.is_fd_dev = d.dev_type in FD_TYPES
         return d
 
+    def test_fd_no_accel_uses_arbitration_rate_and_strips_brs(self):
+        from zdiag.bus import CanFrame
+        sent = []
+        d = self.make("USBCANFD-200U")
+        d.lib.ZCAN_TransmitFD = lambda chn, ref, n: (sent.append(ref._obj.frame.flags), 1)[1]
+        bus = d.start_channel(0, ChannelCfg(protocol="CAN FD", bitrate_kbps=500, data_kbps=2000, fd_accel=False))
+        self.assertIn(("set", "0/canfd_dbit_baud_rate", "500000"), d.lib.calls)             # data phase = arbitration rate
+        bus.send(CanFrame(0x7E2, bytes(8), False, True, True))
+        d2 = self.make("USBCANFD-200U")
+        d2.lib.ZCAN_TransmitFD = lambda chn, ref, n: (sent.append(ref._obj.frame.flags), 1)[1]
+        b2 = d2.start_channel(0, ChannelCfg(protocol="CAN FD", bitrate_kbps=500, data_kbps=2000))
+        self.assertIn(("set", "0/canfd_dbit_baud_rate", "2000000"), d2.lib.calls)
+        b2.send(CanFrame(0x7E2, bytes(8), False, True, True))
+        self.assertEqual(sent, [0, 1])                                                       # BRS only when accelerated
+        c = ChannelCfg(protocol="CAN FD", fd_accel=False, data_kbps=100); c.validate()       # data rate unused -> not checked
+        self.assertEqual((c.data_bitrate, c.brs, c.summary()), (500000, False, "CAN FD 500k 不加速"))
+
     def test_fd_device_fd_mode(self):
         d = self.make("USBCANFD-200U")
         bus = d.start_channel(1, ChannelCfg(protocol="CAN FD", bitrate_kbps=500, data_kbps=2000, terminator=True))

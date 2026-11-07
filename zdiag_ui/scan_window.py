@@ -15,7 +15,7 @@ from .exec_editor import ExecEditorPage, RunPanel
 from .qt import Qt, QtCore, QtWidgets as W, Signal
 
 LIST, MODULE, EDITOR = 0, 1, 2
-COLS = ["", "序号", "软件", "软件编码", "软件版本", "软件日期", "故障码数量", ""]
+COLS = ["", "序号", "软件", "软件编码", "软件版本", "硬件版本", "故障码数量", ""]
 
 
 class _Sig(QtCore.QObject):

@@ -97,7 +97,7 @@ class AppContext:
         bus = self.dev.acquire(ch.channel, owner, cfg.addr, ch.sim_profile, cfg.settings.rx_padding)
         ccfg = self.dev.cfg_of(ch.channel)
         return DiagSession(bus, cfg, hooks, base_dir=base_dir or self.dir,
-                           can_fd=bool(ccfg and ccfg.is_fd), fd_dl=ch.fd_dl, security=self.security, app_dir=self.dir)
+                           can_fd=bool(ccfg and ccfg.is_fd), fd_dl=ch.fd_dl, brs=bool(ccfg is None or ccfg.fd_accel), security=self.security, app_dir=self.dir)
 
     def reload_services(self) -> None:
         self.services = services_def.load_services(self.services_path)

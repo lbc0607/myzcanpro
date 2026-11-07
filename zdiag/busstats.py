@@ -12,6 +12,8 @@ class ChannelCfg:
     protocol: str = "CAN"            # "CAN" | "CAN FD"
     bitrate_kbps: float = 500.0      # arbitration-phase rate, kbaud/s
     data_kbps: float = 2000.0        # CAN FD data-phase rate, kbaud/s
+    fd_accel: bool = True            # CAN FD 加速 (ZCANPro "CANFD加速"): True = data phase at data_kbps + BRS frames;
+                                     # False = whole frame at the arbitration rate, no BRS (data rate setting unused)
     listen_only: bool = False
     terminator: bool = True
     calc_load: bool = True
@@ -23,7 +25,13 @@ class ChannelCfg:
 
     @property
     def data_bitrate(self) -> int:
+        if not self.fd_accel:
+            return self.bitrate                      # no speed-up: data phase = arbitration rate
         return int(round(self.data_kbps * 1000))
+
+    @property
+    def brs(self) -> bool:
+        return self.is_fd and self.fd_accel
 
     @property
     def is_fd(self) -> bool:
@@ -32,13 +40,13 @@ class ChannelCfg:
     def summary(self) -> str:
         s = f"{self.protocol} {self.bitrate_kbps:g}k"
         if self.is_fd:
-            s += f"/{self.data_kbps:g}k"
+            s += f"/{self.data_kbps:g}k" if self.fd_accel else " 不加速"
         return s + (" 只听" if self.listen_only else "")
 
     def validate(self) -> None:
         if not 5 <= self.bitrate_kbps <= 1000:
             raise ValueError("波特率应在 5~1000 kbaud/s")
-        if self.is_fd and not self.bitrate_kbps <= self.data_kbps <= 8000:
+        if self.brs and not self.bitrate_kbps <= self.data_kbps <= 8000:
             raise ValueError("数据域波特率应不低于仲裁域且不超过 8000 kbaud/s")
         if self.calc_load and not 20 <= self.load_interval_ms <= 10000:
             raise ValueError("负载率刷新时间应在 20~10000 ms")

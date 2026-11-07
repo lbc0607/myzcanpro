@@ -18,7 +18,7 @@ from .project import Addressing, DiagConfig, Project, fmt_hex, new_step, normali
 
 FORMAT = "myzcanpro-executor"
 INFO_DIR, FUNC_DIR, MODULE_FILE = "信息", "功能", "module.json"
-INFO_FIELDS = [("code", "软件编码"), ("version", "软件版本"), ("date", "软件日期"), ("dtc", "故障码数量")]
+INFO_FIELDS = [("code", "软件编码"), ("version", "软件版本"), ("date", "硬件版本"), ("dtc", "故障码数量")]
 FIELD_LABEL = dict(INFO_FIELDS)
 FUNC_ADDR = 0x7DF
 BAD_NAME = '\\/:*?"<>|'
@@ -121,13 +121,13 @@ def read_did_executor(name: str, did: str, skip: int = -1, pre: str = "10 03") -
 
 
 def default_info_executor(key: str) -> Executor:
-    # DIDs follow ISO 14229 Annex C; they are only defaults - edit them per software in the GUI.
+    # Defaults as specified by the user (22 F1 95 / 22 F1 94 / 22 F1 93); editable per software in the GUI.
     if key == "code":
-        return read_did_executor("读取软件编码", "F1 88")
+        return read_did_executor("读取软件编码", "F1 95")
     if key == "version":
-        return read_did_executor("读取软件版本", "F1 89")
-    if key == "date":
-        return read_did_executor("读取软件日期", "F1 99")
+        return read_did_executor("读取软件版本", "F1 94")
+    if key == "date":                                     # key stays "date" so existing data folders keep working
+        return read_did_executor("读取硬件版本", "F1 93")
     if key == "dtc":                                      # 19 01 <mask>: 59 01 <availability> <format> <count hi> <count lo>
         ex = Executor("读取故障码数量", Project(name="读取故障码数量", steps=[
             new_step("service", name="进入扩展会话", pdu="10 03"),

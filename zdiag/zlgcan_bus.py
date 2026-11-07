@@ -197,7 +197,7 @@ class ZlgBus(Bus):
         if device.is_fd_dev:
             device.set_value(f"{ch}/protocol", 1 if cfg.is_fd else 0)              # pre-InitCAN
             device.set_value(f"{ch}/canfd_abit_baud_rate", cfg.bitrate)            # also the CAN rate
-            if cfg.is_fd:
+            if cfg.is_fd:                                                          # not accelerated -> data rate = arbitration rate
                 device.set_value(f"{ch}/canfd_dbit_baud_rate", cfg.data_bitrate)
             init.can_type = TYPE_CANFD                            # "FD series must use 1" (zlgcan.h)
             init.cfg.canfd.acc_code, init.cfg.canfd.acc_mask, init.cfg.canfd.mode = 0, 0xFFFFFFFF, mode
@@ -290,7 +290,7 @@ class ZlgBus(Bus):
             t.frame.eff = 1 if fr.extended else 0
             data = fr.data.ljust(_dlc_len(len(fr.data)), b"\x00")
             t.frame.len = len(data)
-            t.frame.flags = 1 if fr.brs else 0
+            t.frame.flags = 1 if (fr.brs and self.cfg.fd_accel) else 0       # no BRS when the channel is not accelerated
             C.memmove(t.frame.data, data, len(data))
             ok = L.ZCAN_TransmitFD(self.chn, C.byref(t), 1)
         else:

@@ -333,7 +333,7 @@ class SendTab(W.QWidget):
         sig = self.sig
 
         def job() -> SendResult:
-            return run_send(bus, items, mode=mode, speed=speed, stop_on_fail=stop, fd=fd, brs=fd, cancel=self.cancel,
+            return run_send(bus, items, mode=mode, speed=speed, stop_on_fail=stop, fd=fd, brs=fd and cfg.fd_accel, cancel=self.cancel,
                             on_status=lambda i, s: sig.changed.emit(i, s))
 
         w = Worker(job, self)

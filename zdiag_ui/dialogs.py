@@ -89,7 +89,6 @@ class SettingsDialog(W.QDialog):
         self.a_ovr_on, self.a_ovr = W.QCheckBox("替换远端STmin(ms):"), W.QLineEdit()
         self.a_retry, self.a_interval, self.a_fc = W.QLineEdit(), W.QLineEdit(), W.QLineEdit()
         self.a_supwait, self.a_anyneg = W.QCheckBox("抑制响应等待"), W.QCheckBox("判断任意消极响应")
-        self.a_brs = W.QCheckBox("CAN FD 诊断帧使用 BRS(位速率切换)")
         rows = [
             (W.QLabel("传输协议:"), self.a_proto, self.a_pad_on, self.a_pad),
             (W.QLabel("接收方填充字节(0x):"), self.a_rxpad, W.QLabel("(ECU回复所用，仅模拟ECU生效)"), None),
@@ -98,7 +97,6 @@ class SettingsDialog(W.QDialog):
             (self.a_ovr_on, self.a_ovr, W.QLabel("下载文件重试次数:"), self.a_retry),
             (W.QLabel("文件下载$36间隔(ms):"), self.a_interval, W.QLabel("流控超时(ms):"), self.a_fc),
             (self.a_supwait, None, self.a_anyneg, None),
-            (self.a_brs, None, None, None),
         ]
         for r, row in enumerate(rows):
             for c, wd in enumerate(row):
@@ -134,11 +132,7 @@ class SettingsDialog(W.QDialog):
         self.ch_fddl = W.QComboBox()
         self.ch_fddl.addItems(["8", "12", "16", "20", "24", "32", "48", "64"])
         self.ch_dll, self.ch_dll_btn = W.QLineEdit(), W.QPushButton("浏览")
-        self.ch_sim = W.QComboBox()
-        self.ch_sim.addItem("新产品 (16字节seed, 例程 01 02)", "new")
-        self.ch_sim.addItem("旧产品 (2字节seed, 例程 DF FE)", "old")
-        items = [("ISO-TP帧长(通道为CAN FD时):", self.ch_fddl), ("zlgcan.dll 路径:", self.ch_dll),
-                 ("模拟ECU 产品:", self.ch_sim)]
+        items = [("ISO-TP帧长(通道为CAN FD时):", self.ch_fddl), ("zlgcan.dll 路径:", self.ch_dll)]
         for r, (lab, wd) in enumerate(items):
             g.addWidget(W.QLabel(lab), r, 0)
             g.addWidget(wd, r, 1)
@@ -263,7 +257,6 @@ class SettingsDialog(W.QDialog):
         self.a_fc.setText(str(s.fc_timeout_ms))
         self.a_supwait.setChecked(s.suppress_wait)
         self.a_anyneg.setChecked(s.any_negative)
-        self.a_brs.setChecked(s.fd_brs)
         self.o_max.setText(str(s.max_log_lines))
         self.o_save.setText(str(s.save_max_lines))
         lg = self.ctx.logcfg
@@ -284,7 +277,6 @@ class SettingsDialog(W.QDialog):
             ch = self.channel
             self.ch_fddl.setCurrentText(str(ch.fd_dl))
             self.ch_dll.setText(ch.zlgcan_dll)
-            self.ch_sim.setCurrentIndex(0 if ch.sim_profile == "new" else 1)
 
     def _on_ok(self) -> None:
         try:
@@ -330,8 +322,7 @@ class SettingsDialog(W.QDialog):
             raise ValueError("序列号文件名无效")
         chv = None
         if self.with_channel:
-            chv = dict(fd_dl=int(self.ch_fddl.currentText()), zlgcan_dll=self.ch_dll.text().strip(),
-                       sim_profile=self.ch_sim.currentData() or "new")
+            chv = dict(fd_dl=int(self.ch_fddl.currentText()), zlgcan_dll=self.ch_dll.text().strip())
         # ---- commit
         ad = self.cfg.addr
         ad.phys, ad.func, ad.resp = a
@@ -343,7 +334,6 @@ class SettingsDialog(W.QDialog):
         s.protocol = self.a_proto.currentText()
         s.padding_enabled, s.padding = self.a_pad_on.isChecked(), pad
         s.override_stmin = self.a_ovr_on.isChecked()
-        s.fd_brs = self.a_brs.isChecked()
         s.suppress_wait, s.any_negative, s.show_raw = (self.a_supwait.isChecked(),
                                                        self.a_anyneg.isChecked(), self.o_raw.isChecked())
         for k_, v_ in vals.items():
@@ -378,32 +368,36 @@ class ChannelConfigDialog(W.QDialog):
             c.setEditable(fd)                      # USBCAN-II only has the fixed timing table
             for v in vals:
                 c.addItem(f"{v:g}")
+        self.c_accel = W.QComboBox()
+        self.c_accel.addItems(["是", "否"])
         self.c_mode = W.QComboBox()
         self.c_mode.addItems(["正常模式", "只听模式"])
         self.k_term = W.QCheckBox("打开终端电阻")
         self.k_load = W.QCheckBox("计算总线负载率")
         self.e_interval = W.QLineEdit()
         self.e_interval.setFixedWidth(80)
-        rows = [("协议:", self.c_proto), ("波特率(kbaud/s):", self.c_baud), ("数据域波特率(kbaud/s):", self.c_dbaud),
-                ("工作模式:", self.c_mode)]
+        rows = [("协议:", self.c_proto), ("CANFD加速:", self.c_accel), ("波特率(kbaud/s):", self.c_baud),
+                ("数据域波特率(kbaud/s):", self.c_dbaud), ("工作模式:", self.c_mode)]
         for r, (lab, wd) in enumerate(rows):
             g.addWidget(W.QLabel(lab), r, 0)
             g.addWidget(wd, r, 1, 1, 2)
-        g.addWidget(self.k_term, 4, 0, 1, 3)
-        g.addWidget(self.k_load, 5, 0, 1, 3)
-        g.addWidget(W.QLabel("刷新时间(ms):"), 6, 0)
-        g.addWidget(self.e_interval, 6, 1)
+        g.addWidget(self.k_term, 5, 0, 1, 3)
+        g.addWidget(self.k_load, 6, 0, 1, 3)
+        g.addWidget(W.QLabel("刷新时间(ms):"), 7, 0)
+        g.addWidget(self.e_interval, 7, 1)
         self.b_ok, self.b_cancel = W.QPushButton("启动"), W.QPushButton("取消")
-        g.addWidget(self.b_ok, 7, 1)
-        g.addWidget(self.b_cancel, 7, 2)
+        g.addWidget(self.b_ok, 8, 1)
+        g.addWidget(self.b_cancel, 8, 2)
         if not has_terminator(device):
             self.k_term.setEnabled(False)
             self.k_term.setText("终端电阻(此设备无软件控制，请用硬件跳线)")
         self.c_proto.currentIndexChanged.connect(self._sync)
+        self.c_accel.currentIndexChanged.connect(self._sync)
         self.k_load.toggled.connect(self._sync)
         self.b_ok.clicked.connect(self._on_ok)
         self.b_cancel.clicked.connect(self.reject)
         self.c_proto.setCurrentText(cfg.protocol if fd else "CAN")
+        self.c_accel.setCurrentIndex(0 if cfg.fd_accel else 1)
         self.c_baud.setCurrentText(f"{cfg.bitrate_kbps:g}")
         self.c_dbaud.setCurrentText(f"{cfg.data_kbps:g}")
         self.c_mode.setCurrentIndex(1 if cfg.listen_only else 0)
@@ -414,7 +408,8 @@ class ChannelConfigDialog(W.QDialog):
 
     def _sync(self, *_) -> None:
         is_fd = self.c_proto.currentText() == "CAN FD"
-        self.c_dbaud.setEnabled(is_fd)
+        self.c_accel.setEnabled(is_fd)
+        self.c_dbaud.setEnabled(is_fd and self.c_accel.currentIndex() == 0)      # 加速=否: 数据域沿用仲裁域速率
         self.e_interval.setEnabled(self.k_load.isChecked())
 
     def _on_ok(self) -> None:
@@ -423,6 +418,7 @@ class ChannelConfigDialog(W.QDialog):
                 protocol=self.c_proto.currentText(),
                 bitrate_kbps=float(self.c_baud.currentText()),
                 data_kbps=float(self.c_dbaud.currentText()) if self.c_proto.currentText() == "CAN FD" else 2000.0,
+                fd_accel=self.c_accel.currentIndex() == 0,
                 listen_only=self.c_mode.currentIndex() == 1,
                 terminator=self.k_term.isChecked(),
                 calc_load=self.k_load.isChecked(),
