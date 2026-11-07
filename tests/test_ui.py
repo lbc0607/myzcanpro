@@ -577,7 +577,7 @@ class ScanTests(Base):
         w = self.w
         w.rows[0]["fields"]["code"].click()
         self.assertEqual(w.stack.currentIndex(), _sw.EDITOR)
-        self.assertEqual([s["pdu"] for s in w.editor.executor.steps], ["10 03", "22 F1 95"])
+        self.assertEqual([s["pdu"] for s in w.editor.executor.steps], ["10 03", "22 F1 94"])
         self.assertFalse(w.editor.e_name.isEnabled())
         w.editor.executor.steps[-1]["pdu"] = "22 F1 90"; w.editor.on_changed()          # the VIN example from the spec
         w.editor.run()                                                                   # 试运行

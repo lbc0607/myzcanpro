@@ -216,7 +216,7 @@ def make_sim(addr, profile: str = "new", **kw):
     prof = dict(seed_len=16, erase_rids=(0xFF00,), seg_crc_rids=(0x0102,), file_crc_rids=(0x0103,)) if profile == "new" else \
         dict(seed_len=2, erase_rids=(0xDFFF,), seg_crc_rids=(0xDFFE,), file_crc_rids=(0xDFFD,))
     n = addr.phys & 0xFFF                                              # each simulated software has its own identity
-    prof.update(dids={0xF195: f"SW{n:03X}0001".encode(), 0xF194: b"V1.0" + bytes([0x30 + n % 10]),
+    prof.update(dids={0xF194: f"SW{n:03X}0001".encode(), 0xF195: b"V1.0" + bytes([0x30 + n % 10]),
                       0xF193: b"HW" + bytes([0x30 + n % 10])},
                 dtcs=[bytes([0x01, 0x23, 0x45, 0x08])] * (n % 4))
     prof.update(kw)

@@ -121,11 +121,11 @@ def read_did_executor(name: str, did: str, skip: int = -1, pre: str = "10 03") -
 
 
 def default_info_executor(key: str) -> Executor:
-    # Defaults as specified by the user (22 F1 95 / 22 F1 94 / 22 F1 93); editable per software in the GUI.
+    # ISO 14229-1 Annex C: F194 supplier ECU software number, F195 software version, F193 hardware version; editable per software in the GUI.
     if key == "code":
-        return read_did_executor("读取软件编码", "F1 95")
+        return read_did_executor("读取软件编码", "F1 94")
     if key == "version":
-        return read_did_executor("读取软件版本", "F1 94")
+        return read_did_executor("读取软件版本", "F1 95")
     if key == "date":                                     # key stays "date" so existing data folders keep working
         return read_did_executor("读取硬件版本", "F1 93")
     if key == "dtc":                                      # 19 01 <mask>: 59 01 <availability> <format> <count hi> <count lo>
