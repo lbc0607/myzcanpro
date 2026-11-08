@@ -14,6 +14,11 @@ from .rpc import RpcServer
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    for st in (sys.stdout, sys.stderr):                      # Windows pipes default to the ANSI code page
+        try:
+            st.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError, OSError):
+            pass
     ap = argparse.ArgumentParser(prog="python -m zdiag.daemon", description="CanVDS 无界面服务（本机接口）")
     ap.add_argument("--home", default=None, help="放 scan_data/配置文件的文件夹（默认 CANVDS_HOME 或程序目录）")
     ap.add_argument("--port", type=int, default=0, help="0 = 自动选择")
