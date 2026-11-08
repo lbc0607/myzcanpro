@@ -85,7 +85,16 @@ class Daemon(unittest.TestCase):
         p2 = subprocess.run([sys.executable, "-m", "zdiag.daemon", "--home", home], cwd=ROOT, capture_output=True, timeout=30)
         self.assertEqual(p2.returncode, 2); self.assertIn("已有", p2.stderr.decode("utf-8", "replace"))
         p.terminate(); p.wait(10)
-        self.assertIsNone(read_endpoint(home))
+        self.assertFalse(ping(e["url"]))                                                          # Windows terminate() is a hard kill: a stale file may remain
+        if os.name == "posix": self.assertIsNone(read_endpoint(home))                              # SIGTERM cleans up
+        p3 = subprocess.Popen([sys.executable, "-m", "zdiag.daemon", "--home", home], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.addCleanup(lambda: (p3.terminate(), p3.wait(10), p3.stdout.close(), p3.stderr.close()))
+        e2 = None
+        for _ in range(100):
+            e2 = read_endpoint(home)
+            if e2 and ping(e2["url"]): break
+            time.sleep(0.1)
+        self.assertTrue(e2 and ping(e2["url"]), "a stale endpoint file must not block a new daemon")
 
 
 if __name__ == "__main__":
