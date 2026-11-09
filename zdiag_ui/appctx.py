@@ -29,6 +29,7 @@ class AppContext:
         self.logcfg = LogCfg()                                     # log folder / file size / retention, shared
         self.security = SecurityCfg()                              # shared by every window, persisted
         self.channel = Channel()
+        self.agent_enabled = True                                  # local agent port (MCP) on by default; remembered
         # device manager panel state, persisted: selected device/index + last config per channel number
         self.devsel = {"device": SIM_DEVICE, "index": 0}
         self.chan_cfgs = {}
@@ -52,6 +53,7 @@ class AppContext:
         if not isinstance(d, dict):
             return
         self.diag_cfg = DiagConfig.from_dict(d.get("diag", {}))
+        self.agent_enabled = bool(d.get("agent_enabled", True))
         if isinstance(d.get("logcfg"), dict):
             _fill(self.logcfg, d["logcfg"])
             try:
@@ -83,7 +85,7 @@ class AppContext:
             self.scan_dir = d["scan_dir"]
 
     def save(self) -> None:
-        d = {"diag": self.diag_cfg.to_dict(), "security": self.security.to_dict(), "logcfg": asdict(self.logcfg), "channel": asdict(self.channel), "last_dir": self.last_dir, "scan_dir": self.scan_dir,
+        d = {"diag": self.diag_cfg.to_dict(), "security": self.security.to_dict(), "logcfg": asdict(self.logcfg), "channel": asdict(self.channel), "agent_enabled": self.agent_enabled, "last_dir": self.last_dir, "scan_dir": self.scan_dir,
              "devsel": self.devsel, "chan_cfgs": {str(k): asdict(v) for k, v in self.chan_cfgs.items()}}
         try:
             with open(self.cfg_path, "w", encoding="utf-8") as f:

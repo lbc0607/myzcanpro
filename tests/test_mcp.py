@@ -15,7 +15,9 @@ EXPECTED = {"get_flow_format", "get_catalog", "validate_flow", "save_flow", "loa
             "get_status", "device_list", "device_open", "device_close", "channel_start", "channel_stop", "uds_request", "read_did", "write_did",
             "read_dtc", "clear_dtc", "ecu_reset", "session_control", "security_unlock", "keepalive_start", "keepalive_stop", "list_modules",
             "scan_module", "run_function", "send_frame", "cyclic_start", "cyclic_stop", "monitor_trace", "monitor_snapshot", "monitor_capture",
-            "monitor_clear", "record_start", "record_stop", "get_settings", "set_settings"}
+            "monitor_clear", "record_start", "record_stop", "get_settings", "set_settings",
+            "get_function_format", "analyze_trace", "create_module", "check_function", "save_function", "read_function", "delete_function",
+            "start_function", "function_status", "stop_function"}
 
 
 def tool(_tool, **args):
@@ -84,6 +86,19 @@ class Bridge(unittest.TestCase):
         slow = {"nodes": [{"id": "l", "type": "lane", "channel": 0, "children": [{"id": "w", "type": "delay", "seconds": 30}]}]}
         self.assertEqual(tool("run_flow", flow=slow, wait_s=0.5)["state"], "running")
         self.assertEqual(tool("stop_flow")["state"], "finished")
+
+    def test_trace_to_function_tools(self):
+        sys.path.insert(0, os.path.dirname(__file__))
+        from test_flashgen import Session
+        self.assertIn("service", tool("get_function_format"))
+        r = tool("analyze_trace", text=Session().flash().csv()); self.assertTrue(r["draft"]["steps"]); self.assertTrue(r["draft"]["todo"])
+        self.assertTrue(tool("create_module", name="烧写ECU", phys=r["suggested_module"]["phys"], resp=r["suggested_module"]["resp"])["created"])
+        chk = tool("check_function", steps=r["draft"]["steps"]); self.assertFalse(chk["ok"]); self.assertTrue(any("密钥" in p for p in chk["problems"]))
+        sv = tool("save_function", module="烧写ECU", path="烧写草稿", steps=r["draft"]["steps"], allow_incomplete=True); self.assertTrue(sv["saved"])
+        self.assertTrue(tool("read_function", module="烧写ECU", path="烧写草稿")["problems"])
+        self.assertIn("error", tool("save_function", module="没有", path="x", steps=[{"type": "delay", "ms": 1}]))
+        self.assertTrue(tool("delete_function", module="烧写ECU", path="烧写草稿")["deleted"])
+        self.assertIn("error", tool("analyze_trace"))
 
     def test_no_endpoint_without_autostart_is_an_error_not_a_crash(self):
         os.environ["CANVDS_AUTOSTART"] = "0"

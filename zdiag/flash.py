@@ -73,10 +73,13 @@ def parse_srec(text: str) -> List[Segment]:
 def load_image(path: str, bin_addr: int = 0) -> List[Segment]:
     low = path.lower()
     if low.endswith((".hex", ".ihx")):
-        return parse_ihex(open(path, encoding="ascii", errors="replace").read())
+        with open(path, encoding="ascii", errors="replace") as f:
+            return parse_ihex(f.read())
     if low.endswith((".s19", ".srec", ".s28", ".s37", ".mot")):
-        return parse_srec(open(path, encoding="ascii", errors="replace").read())
-    return [Segment(bin_addr, open(path, "rb").read())]
+        with open(path, encoding="ascii", errors="replace") as f:
+            return parse_srec(f.read())
+    with open(path, "rb") as f:
+        return [Segment(bin_addr, f.read())]
 
 
 # ------------------------------------------------------------------ flashing

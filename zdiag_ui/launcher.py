@@ -179,7 +179,7 @@ class LauncherWindow(W.QMainWindow):
     def _build_agent_panel(self, v) -> None:
         g = W.QGroupBox("Agent 接口（MCP）")
         gl = W.QVBoxLayout(g)
-        self.k_agent = W.QCheckBox("允许 agent 通过本机端口操作 CanVDS（共用当前设备和设置；仅本机、带令牌；每次启动需重新开启）")
+        self.k_agent = W.QCheckBox("允许 agent 通过本机端口操作 CanVDS（共用当前设备和设置；仅本机、带令牌；也可不开界面，由 MCP 自动拉起无界面服务）")
         self.l_agent = W.QLabel("未开启")
         self.b_agent_copy = W.QPushButton("复制连接信息")
         self.b_agent_copy.setEnabled(False)
@@ -192,10 +192,16 @@ class LauncherWindow(W.QMainWindow):
         self.k_agent.toggled.connect(self._toggle_agent)
         self.b_agent_copy.clicked.connect(self._copy_agent)
 
+    def autostart_agent(self) -> None:
+        """Called once by the application after the window exists: honour the remembered choice (default on)."""
+        if self.ctx.agent_enabled:
+            self.k_agent.setChecked(True)
+
     def _toggle_agent(self, checked: bool = False) -> None:
         if checked:
             self.start_agent()
-        else:
+        elif self.rpc is not None:                         # the user unticked it: remember (internal stops leave the choice alone)
+            self.ctx.agent_enabled = False
             self.stop_agent()
 
     def start_agent(self) -> bool:
@@ -212,6 +218,7 @@ class LauncherWindow(W.QMainWindow):
             warn(self, f"无法开启 agent 接口: {e}")
             return False
         self.ops, self.rpc = ops, srv
+        self.ctx.agent_enabled = True
         self.l_agent.setText(f"已开启: {srv.url}   （连接信息见 {os.path.join(self.ctx.dir, 'CanVDS_rpc.json')}）")
         self.k_agent.setChecked(True)
         self.b_agent_copy.setEnabled(True)

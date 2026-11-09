@@ -12,7 +12,7 @@ for _st in (sys.stdout, sys.stderr):
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
-MODULES = ["test_all", "test_sa", "test_engine", "test_serial", "test_logfiles", "test_flow", "test_flowlayout", "test_flowapi", "test_ops", "test_rpc", "test_mcp", "test_devmgr", "test_monitor", "test_scan", "test_send", "test_ui"]
+MODULES = ["test_all", "test_sa", "test_engine", "test_serial", "test_logfiles", "test_flow", "test_flowlayout", "test_flowapi", "test_ops", "test_rpc", "test_mcp", "test_flashgen", "test_funcapi", "test_devmgr", "test_monitor", "test_scan", "test_send", "test_ui"]
 
 if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromNames(MODULES)

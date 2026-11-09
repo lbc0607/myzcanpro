@@ -86,8 +86,8 @@ ECU 刷新方案为 JSON(格式 `myzcanpro-flash`),可自由命名扩展名,各 
 agent 可以不开界面完成上位机的主要操作：设备/通道、UDS 诊断、自定义报文收发与监视、全局设置、软件扫描，以及流程编排（生成、校验、保存、执行）。
 
 **架构**：所有操作都在 `zdiag/ops.py`（统一操作层，和界面共用同一个设备管理器、设置、监视）；`zdiag/rpc.py` 把它开成**仅本机回环、带随机令牌**的 HTTP 端口；`mcp_server.py` 是这个端口的薄桥接。端口有两种来源：
-1. **开在 CanVDS 界面里**：「设备管理」页的「Agent 接口」打勾（每次启动需重新打勾）。agent 和你共用同一个设备，你能在界面上实时看到 agent 的操作（设备/通道状态、报文监视、最近操作）。
-2. **无界面 daemon**：`python -m zdiag.daemon`（真机请用能加载 zlgcan.dll 的 32 位 Python）；MCP 服务发现没有端口时会自己拉起一个。
+1. **开在 CanVDS 界面里**：「设备管理」页的「Agent 接口」，默认打勾（随界面启动，可取消，记住你的选择）。agent 和你共用同一个设备，你能在界面上实时看到 agent 的操作（设备/通道状态、报文监视、最近操作）。
+2. **无界面 daemon（不需要打开上位机）**：`python -m zdiag.daemon`（真机请用能加载 zlgcan.dll 的 32 位 Python）；MCP 服务发现没有端口时会**自动拉起一个**，agent 一连上就能直接操作，随 MCP 服务退出而退出。
 > 同一设备只能由一个程序打开：界面和 daemon 不要同时运行（后启动的会被拒绝并提示）。
 
 **启动 MCP 服务**（标准 stdio，需 Python ≥ 3.10）
@@ -104,14 +104,17 @@ Claude Code：`claude mcp add canvds -e CANVDS_HOME=D:/myzcanpro -- python D:/my
 
 环境变量：`CANVDS_HOME`（放 scan_data 和配置的文件夹，默认本仓库/exe 所在目录）、`CANVDS_FLOW_DIR`（流程保存位置，默认 `<HOME>/flows`）、`CANVDS_PYTHON`（自动拉起 daemon 用的 Python）、`CANVDS_URL`+`CANVDS_TOKEN`（直接指定端口）、`CANVDS_AUTOSTART=0`（禁止自动拉起 daemon）。找端口的顺序：CANVDS_URL → `<HOME>/CanVDS_rpc.json`（界面或 daemon 写入）→ 自动拉起 daemon。
 
-**工具（39 个）**
+**工具（49 个）**
 - 设备/通道：`get_status` `device_list` `device_open` `device_close` `channel_start` `channel_stop`
 - UDS：`uds_request` `read_did` `write_did` `read_dtc` `clear_dtc` `ecu_reset` `session_control` `security_unlock` `keepalive_start` `keepalive_stop`
 - 软件扫描：`list_modules` `scan_module` `run_function`
+- 创建模块/功能（含从报文生成烧写功能）：`get_function_format` `analyze_trace` `create_module` `check_function` `save_function` `read_function` `delete_function`，执行用 `start_function` `function_status` `stop_function`（后台执行，适合耗时数分钟的烧写）
 - 报文：`send_frame` `cyclic_start` `cyclic_stop` `monitor_trace` `monitor_snapshot` `monitor_capture` `monitor_clear` `record_start` `record_stop`
 - 设置：`get_settings` `set_settings`（分区 diag / security / log / channel，先校验再原地修改并保存，不合法的值一律拒绝且不改任何东西）
 - 流程：`get_flow_format` `get_catalog` `validate_flow` `save_flow` `load_flow` `list_flows` `run_flow` `flow_status` `stop_flow`（`run_flow` 的 `simulate=true` 用模拟 ECU 试跑）
 
-**安全约定**：端口只接受本机连接（回环地址 + Host 校验 + 拒绝浏览器 Origin）并要求令牌；连接信息文件仅当前用户可读；工具说明要求 agent 在写 DID、清故障码、复位、解锁、发报文、改设置、真机执行流程前先征得你同意；刷写（ECU刷新）没有开放。`save_flow` 只能写 `flows/` 文件夹，录制只能写日志文件夹。
+**安全**：端口只接受本机连接（回环地址 + Host 校验 + 拒绝浏览器 Origin）并要求令牌；连接信息文件仅当前用户可读。工具说明不再要求 agent 逐项向你确认——你说做什么它就直接做；只有烧写文件、密钥 DLL、CRC 算法、擦除范围这类必须由你提供的参数，缺了才会问，不会猜。`save_flow` 只能写 `flows/` 文件夹，录制只能写日志文件夹，`save_function` 只能写 scan_data 下模块的「功能」文件夹，且默认保存未补全的草稿（补全前不能执行）。
 
 **命令行**（不支持 MCP 的 agent 通过 shell 调用，只用标准库）：流程相关 `python -m zdiag.cli format | catalog | list | check FILE | outline FILE | run FILE [--simulate]`；其余操作可直接 POST 到本机端口（`POST /call {"method": "...", "params": {...}}`，头 `Authorization: Bearer <令牌>`，方法名见 `zdiag/ops.py` 的 METHODS）。
+
+**从报文生成烧写功能**：把烧写时抓的报文（ZCANPro / CanVDS 保存的 CSV、Vector ASC、`7E2 02 10 03 ...` 一行一帧的文本均可）给 agent，它会：`analyze_trace`（重组 ISO-TP、配对请求/响应、忽略总线上其它周期报文；36 传输数据自动折叠）→ 生成步骤草稿（会话/解锁/Flash driver/擦除/下载/CRC/自定义例程/复位/延时，多段下载合并为一个步骤）→ 列出报文里不可能有的待补项（烧写文件、密钥 DLL、CRC 算法）→ 你确认后 `save_function` 存进指定模块的「功能」。已用模拟 ECU 做过闭环：录下一次完整烧写 → 生成功能 → 补全 → 重新烧写成功。在软件扫描窗口里重新打开/刷新模块后可以看到新建的功能。

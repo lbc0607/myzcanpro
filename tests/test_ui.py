@@ -192,7 +192,12 @@ class LauncherTests(Base):
         w2 = LauncherWindow(self.ctx); w2.k_agent.setChecked(True); self.assertFalse(w2.start_agent())   # a second GUI is refused
         self.assertTrue(msgs("warn")); self.assertFalse(w2.k_agent.isChecked())
         w.stop_agent(); self.assertIsNone(w.rpc); self.assertIsNone(read_endpoint(self.ctx.dir)); self.assertEqual(w.l_agent.text(), "未开启")
-        w.k_agent.setChecked(True); w.start_agent(); w.close(); self.assertIsNone(read_endpoint(self.ctx.dir))   # closing stops it
+        self.assertTrue(self.ctx.agent_enabled)
+        w.k_agent.click(); self.assertIsNotNone(w.rpc)
+        w.k_agent.click(); self.assertIsNone(w.rpc); self.assertFalse(self.ctx.agent_enabled)                      # unticking is remembered
+        self.ctx.save(); from zdiag_ui.appctx import AppContext; c2 = AppContext(self.ctx.dir); self.assertFalse(c2.agent_enabled); c2.dev.shutdown()
+        self.ctx.agent_enabled = True; w.autostart_agent(); self.assertIsNotNone(w.rpc)                            # app start honours the choice
+        w.close(); self.assertIsNone(read_endpoint(self.ctx.dir)); self.assertTrue(self.ctx.agent_enabled)        # closing stops it, keeps the choice
 
     def test_device_toggle_and_channel_panels(self):
         w = self._fresh_launcher()

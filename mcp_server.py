@@ -24,7 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 os.environ.setdefault("CANVDS_HOME", HERE)
 
-from zdiag import flowapi                                  # noqa: E402
+from zdiag import flowapi, funcapi                         # noqa: E402
 from zdiag.flow import FlowError                           # noqa: E402
 from zdiag.rpc import RpcError, ping, read_endpoint, rpc_call   # noqa: E402
 
@@ -36,8 +36,8 @@ except ImportError:                                        # mcp 1.x
 mcp = MCPServer("canvds", instructions=(
     "Operate the CanVDS diagnostic host. Typical order: get_status → device_open (模拟ECU(测试) for a dry run) → channel_start → "
     "uds_request / scan_module / send_frame / monitor_* . For multi-step jobs write a flow (get_flow_format, get_catalog, "
-    "validate_flow, save_flow, run_flow). Everything except the simulator acts on the REAL vehicle / bus: ask the user before "
-    "writing (write_did, clear_dtc, ecu_reset, security_unlock, send_frame, cyclic_start, set_settings, run_flow on real devices)."))
+    "validate_flow, save_flow, run_flow). Tools act on the real device / bus (the simulator device is for dry runs). Do what the user asks directly; only ask when a required "
+    "parameter is missing - for flashing: files, key DLL, CRC algorithm and erase range must come from the user, not be guessed."))
 
 FlowArg = Union[Dict[str, Any], str]
 _daemon: Optional[subprocess.Popen] = None
@@ -148,12 +148,90 @@ def list_flows() -> Dict[str, Any]:
     return {"flows": flowapi.list_flows()}
 
 
+# --------------------------------------------------------------------------- modules / 功能: create from a recorded trace
+@mcp.tool()
+def get_function_format() -> str:
+    """Describe what a 功能 (a module's list of steps: service / delay / unlock / driver / download / routine) is, with the typical flashing
+    order and the workflow for turning a recorded trace into a function. Read this before creating a function."""
+    return funcapi.FUNCTION_DOC
+
+
+@mcp.tool()
+@_guard
+def analyze_trace(text: str = "", path: str = "", tester_id: str = "", ecu_id: str = "", time_unit: str = "auto",
+                  delay_threshold_s: float = 0.5) -> Dict[str, Any]:
+    """Read a recorded CAN trace (ZCANPro / CanVDS CSV export, Vector ASC, or lines like '7E2 02 10 03 ...'): reassembles ISO-TP, pairs the UDS
+    requests with responses and drafts the steps of a 功能 (flashing included). Give the trace as `text` or as `path` of a file on this machine.
+    The result has `exchanges` (a readable list), `pairs` (tester/ECU CAN IDs found), and `draft` = {steps, todo, warnings, notes}: `todo` lists
+    what a trace cannot contain (flash files, key DLL, CRC algorithm) - ask the user for those, don't guess. tester_id / ecu_id (hex) select one
+    ECU in a multi-ECU trace; time_unit auto | s | ms | us."""
+    return funcapi.analyze_trace(text, path, tester_id, ecu_id, time_unit, delay_threshold_s)
+
+
+@mcp.tool()
+@_guard
+def create_module(name: str, phys: str, resp: str = "", func: str = "") -> Dict[str, Any]:
+    """Create a 软件模块 (an ECU with its diagnostic addresses; phys/resp/func are hex CAN IDs, resp empty = phys+8, func empty = 7DF)
+    with the standard scan executors. Functions are then added with save_function."""
+    return funcapi.create_module(name, phys, resp, func)
+
+
+@mcp.tool()
+@_guard
+def check_function(steps: List[Dict[str, Any]], result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Validate function steps without saving: missing files / key DLL, bad hex, bad ids... Returns ok and `problems`."""
+    r = funcapi.check_steps(steps, result)
+    return {"ok": r["ok"], "problems": r["problems"]}
+
+
+@mcp.tool()
+@_guard
+def save_function(module: str, path: str, steps: List[Dict[str, Any]], result: Optional[Dict[str, Any]] = None, overwrite: bool = False,
+                  allow_incomplete: bool = True) -> Dict[str, Any]:
+    """Create / replace a 功能 of a module: path like '烧写' or '标定/零位标定' (folders are created). Steps that still lack files / key DLL are
+    saved as a draft (allow_incomplete=true, the default; it cannot run until completed; set false to refuse such saves). The user sees it in 软件扫描 → 模块 → 功能."""
+    return funcapi.save_function(module, path, steps, result, overwrite, allow_incomplete)
+
+
+@mcp.tool()
+@_guard
+def read_function(module: str, path: str) -> Dict[str, Any]:
+    """Read a saved 功能 (steps, result spec and what is still missing) e.g. to modify it."""
+    return funcapi.read_function(module, path)
+
+
+@mcp.tool()
+@_guard
+def delete_function(module: str, path: str) -> Dict[str, Any]:
+    """Delete one saved 功能 (never a module)."""
+    return funcapi.delete_function(module, path)
+
+
+@mcp.tool()
+async def start_function(channel: int, module: str, path: str) -> Dict[str, Any]:
+    """Run a saved 功能 in the background (use this for flashing, which takes minutes); poll function_status. Real device: make sure the files / key DLL / CRC settings
+    come from the user (a wrong one can brick the ECU)."""
+    return await call("function_start", channel=channel, module=module, path=path)
+
+
+@mcp.tool()
+async def function_status() -> Dict[str, Any]:
+    """State of the running / last 功能: per-step state and detail, progress, log lines, result."""
+    return await call("function_status")
+
+
+@mcp.tool()
+async def stop_function() -> Dict[str, Any]:
+    """Cancel the running 功能 (a flash cancelled midway leaves the ECU in its bootloader: tell the user)."""
+    return await call("function_stop")
+
+
 # --------------------------------------------------------------------------- flows: run
 @mcp.tool()
 async def run_flow(name: str = "", flow: Optional[FlowArg] = None, simulate: bool = False, wait_s: float = 60.0) -> Dict[str, Any]:
     """Run a saved flow (`name`) or a `flow` object on the shared device and wait up to wait_s seconds for it to finish; if it is
     still running the current state is returned - poll flow_status. simulate=true replaces 打开设备 with the simulated ECU
-    (safe dry run). Without it the flow operates the REAL device and bus: get the user's consent first."""
+    (safe dry run). Without it the flow operates the real device and bus."""
     if isinstance(flow, str):
         try:
             flow = json.loads(flow)
@@ -241,7 +319,7 @@ async def read_did(channel: int, did: str, module: str = "", parse: str = "hex")
 
 @mcp.tool()
 async def write_did(channel: int, did: str, data: str, module: str = "") -> Dict[str, Any]:
-    """Write a data identifier (2E) with hex data. Changes the ECU: ask the user first."""
+    """Write a data identifier (2E) with hex data. Changes the ECU."""
     return await call("did_write", channel=channel, did=did, data=data, module=module or None)
 
 
@@ -253,13 +331,13 @@ async def read_dtc(channel: int, module: str = "", mask: str = "08") -> Dict[str
 
 @mcp.tool()
 async def clear_dtc(channel: int, module: str = "", group: str = "FF FF FF") -> Dict[str, Any]:
-    """Clear DTCs (14). Changes the ECU: ask the user first."""
+    """Clear DTCs (14). Changes the ECU."""
     return await call("dtc_clear", channel=channel, module=module or None, group=group)
 
 
 @mcp.tool()
 async def ecu_reset(channel: int, module: str = "", kind: str = "01") -> Dict[str, Any]:
-    """ECU reset (11). Restarts the ECU: ask the user first."""
+    """ECU reset (11). Restarts the ECU."""
     return await call("ecu_reset", channel=channel, module=module or None, kind=kind)
 
 
@@ -375,7 +453,7 @@ async def get_settings(section: str = "") -> Dict[str, Any]:
 @mcp.tool()
 async def set_settings(section: str, values: Dict[str, Any]) -> Dict[str, Any]:
     """Change global settings (validated, saved, shared with the CanVDS windows). diag: {"addr": {"phys": "7E3", "resp": "7EB"},
-    "settings": {"p2_ms": 500}, "keepalive": {...}}; security / log / channel: flat fields. Ask the user before changing."""
+    "settings": {"p2_ms": 500}, "keepalive": {...}}; security / log / channel: flat fields."""
     return await call("settings_set", section=section, values=values)
 
 

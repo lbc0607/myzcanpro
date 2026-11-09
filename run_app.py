@@ -35,6 +35,7 @@ def main() -> int:
     from zdiag_ui.launcher import LauncherWindow
     win = LauncherWindow(AppContext())
     win.show()
+    win.autostart_agent()
     return app.exec_()
 
 

@@ -93,6 +93,7 @@ class Ops:
         self._finished: Dict[str, dict] = {}                   # key -> summary of a sender that has ended
         self._keepalive: Dict[int, Any] = {}                   # channel -> DiagSession holding a 3E keep-alive
         self._flow: Optional[dict] = None                      # the running / last flow run
+        self._job: Optional[dict] = None                       # the running / last 功能 started with function_start
 
     # ------------------------------------------------------------------ channel ownership
     def _hold(self, ch: int):
@@ -221,11 +222,11 @@ class Ops:
             cfg.addr.extended = bool(extended)
         return cfg
 
-    def _session(self, channel: int, cfg: DiagConfig, log: List[LogEvent]):
+    def _session(self, channel: int, cfg: DiagConfig, log: List[LogEvent], hooks: Optional[Hooks] = None, all_log: bool = False):
         n = _int(channel, "通道号", 0, 15)
         tok = self._hold(n)
-        hooks = Hooks()
-        hooks.log = lambda e: log.append(e) if e.core else None
+        hooks = hooks or Hooks()
+        hooks.log = (lambda e: log.append(e)) if all_log else (lambda e: log.append(e) if e.core else None)
         try:
             sess = self.ctx.open_session(cfg, dataclasses.replace(self.ctx.channel, channel=n), tok, hooks)
         except ConnError as e:
@@ -414,6 +415,67 @@ class Ops:
             sess.close()
             self._drop(n)
         return {"ok": out.ok, "value": out.text, "raw": fmt_hex(out.raw), "error": out.error, "log": self._log_lines(log)}
+
+    def function_start(self, channel: int, module: str, path: str) -> Dict[str, Any]:
+        """Run a saved 功能 in the background (for long ones such as flashing); poll function_status, stop with function_stop."""
+        with self.lock:
+            if self._job and self._job["thread"].is_alive():
+                raise OpsError("已有功能在执行，请先 function_stop 或等它结束")
+        m = self._module(module)
+        p = os.path.join(self.store.func_dir(m), *str(path).replace("\\", "/").split("/")) + ".json"
+        if ".." in str(path) or not os.path.isfile(p):
+            raise OpsError(f"模块「{module}」里没有功能「{path}」，可用: {', '.join(function_paths(self.store, module))}")
+        ex = Executor.load(p)
+        from .engine import preflight
+        problems = preflight(list(ex.steps), self.ctx.dir)
+        if problems:
+            return {"started": False, "message": "功能还不完整，未执行", "problems": problems}
+        log: List[LogEvent] = []
+        job: Dict[str, Any] = {"module": module, "path": path, "steps": {}, "progress": (0, 0), "log": log, "ok": None, "error": "",
+                               "started": time.time(), "names": [x.get("name", "") for x in ex.steps]}
+        hooks = Hooks()
+        hooks.step = lambda i, st, d: job["steps"].__setitem__(i, (st, d))
+        hooks.progress = lambda done, total: job.__setitem__("progress", (done, total)) if total else None   # (0, 0) = "no bar"
+        sess, n = self._session(channel, cfg_for(self.ctx.diag_cfg, m), log, hooks, all_log=True)
+        job["sess"] = sess
+
+        def go() -> None:
+            try:
+                out = run_executor(sess, ex)
+                job["ok"], job["error"] = out.ok, out.error
+                job["value"] = out.text
+            except Exception as e:
+                job["ok"], job["error"] = False, f"{type(e).__name__}: {e}"
+            finally:
+                sess.close()
+                self._drop(n)
+
+        t = threading.Thread(target=go, name="ops-function", daemon=True)
+        job["thread"] = t
+        self._job = job
+        t.start()
+        return {"started": True, "message": f"「{module}/{path}」已开始，用 function_status 查看进度"}
+
+    def function_status(self) -> Dict[str, Any]:
+        j = self._job
+        if j is None:
+            return {"state": "none", "message": "还没有执行过功能"}
+        running = j["thread"].is_alive()
+        steps = [{"index": i + 1, "name": j["names"][i] if i < len(j["names"]) else "", "state": st, "detail": d[:300]}
+                 for i, (st, d) in sorted(j["steps"].items())]
+        done, total = j["progress"]
+        return {"state": "running" if running else "finished", "module": j["module"], "path": j["path"],
+                "ok": None if running else bool(j["ok"]), "error": "" if running else j["error"], "value": j.get("value", ""),
+                "progress": {"done": done, "total": total}, "steps": steps, "log": self._log_lines(j["log"]),
+                "elapsed_s": round(time.time() - j["started"], 1)}
+
+    def function_stop(self) -> Dict[str, Any]:
+        j = self._job
+        if j is None or not j["thread"].is_alive():
+            return {"message": "没有正在执行的功能"}
+        j["sess"].cancel.set()
+        j["thread"].join(timeout=15)
+        return {"message": "已请求停止", **self.function_status()}
 
     # ------------------------------------------------------------------ raw frames
     def _item(self, can_id: str, data: str, extended: bool, fd: bool, remote: bool, count: int, interval_ms: int) -> SendItem:
@@ -747,13 +809,14 @@ class Ops:
     # ------------------------------------------------------------------ lifecycle
     def shutdown(self) -> None:
         self.flow_stop()
+        self.function_stop()
         self._stop_all_ours()
 
 
 # methods reachable over RPC / MCP (whitelist)
 METHODS = ["status", "device_list", "device_open", "device_close", "channel_start", "channel_stop",
            "uds_request", "did_read", "did_write", "dtc_read", "dtc_clear", "ecu_reset", "session_control", "security_unlock",
-           "keepalive_start", "keepalive_stop", "modules", "scan", "function_run",
+           "keepalive_start", "keepalive_stop", "modules", "scan", "function_run", "function_start", "function_status", "function_stop",
            "frame_send", "cyclic_start", "cyclic_stop", "cyclic_list",
            "monitor_trace", "monitor_snapshot", "monitor_capture", "monitor_clear", "record_start", "record_stop",
            "settings_get", "settings_set", "flow_start", "flow_status", "flow_stop"]
