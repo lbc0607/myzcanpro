@@ -11,7 +11,7 @@ from zdiag.project import SIM_DEVICE
 from zdiag.rpc import RpcServer
 from zdiag_ui.appctx import AppContext
 
-EXPECTED = {"get_flow_format", "get_catalog", "validate_flow", "save_flow", "load_flow", "list_flows", "run_flow", "flow_status", "stop_flow",
+EXPECTED = {"lin_open", "lin_close", "lin_request", "lin_scan_nodes", "lin_scan_pump", "get_flow_format", "get_catalog", "validate_flow", "save_flow", "load_flow", "list_flows", "run_flow", "flow_status", "stop_flow",
             "get_status", "device_list", "device_open", "device_close", "channel_start", "channel_stop", "uds_request", "read_did", "write_did",
             "read_dtc", "clear_dtc", "ecu_reset", "session_control", "security_unlock", "keepalive_start", "keepalive_stop", "list_modules",
             "scan_module", "run_function", "send_frame", "cyclic_start", "cyclic_stop", "monitor_trace", "monitor_snapshot", "monitor_capture",

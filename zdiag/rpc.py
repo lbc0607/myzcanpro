@@ -22,7 +22,7 @@ ENDPOINT_FILE = "CanVDS_rpc.json"
 MAX_BODY = 4 * 1024 * 1024
 # quick / read-only / must-stay-responsive methods run concurrently; everything that talks on a bus is serialised
 FREE = {"status", "device_list", "modules", "settings_get", "monitor_trace", "monitor_snapshot", "monitor_capture", "monitor_clear",
-        "cyclic_list", "cyclic_stop", "keepalive_stop", "record_start", "record_stop", "flow_status", "flow_stop"}
+        "cyclic_list", "cyclic_stop", "keepalive_stop", "record_start", "record_stop", "flow_status", "flow_stop", "lin_status", "lin_close"}
 
 
 def endpoint_path(home: str) -> str:

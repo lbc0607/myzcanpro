@@ -21,6 +21,7 @@ from .project import (DEVICES, SIM_DEVICE, Addressing, DiagConfig, fmt_hex, new_
 from .scanlib import (INFO_FIELDS, Executor, ScanError, ScanStore, cfg_for, default_skip, function_paths, render_result,
                       run_executor)
 from .sendlist import FD_LENGTHS, SendItem, run_send
+from . import lin as linmod
 
 MAX_FRAMES = 100000                 # one frame_send call
 MAX_BLOCKING_S = 120.0              # a blocking call (frame_send) never runs longer than this
@@ -94,6 +95,7 @@ class Ops:
         self._keepalive: Dict[int, Any] = {}                   # channel -> DiagSession holding a 3E keep-alive
         self._flow: Optional[dict] = None                      # the running / last flow run
         self._job: Optional[dict] = None                       # the running / last 功能 started with function_start
+        self._lin: Optional[dict] = None                       # the open LIN master: {"master","kind","channel","baud"}
 
     # ------------------------------------------------------------------ channel ownership
     def _hold(self, ch: int):
@@ -195,6 +197,7 @@ class Ops:
         self.keepalive_stop(n)
 
     def _stop_all_ours(self) -> None:
+        self.lin_close()
         for k in list(self._senders):
             self._stop_sender(k)
         for n in list(self._keepalive):
@@ -806,6 +809,105 @@ class Ops:
         st["thread"].join(timeout=10)
         return {"message": "已请求停止", **self.flow_status()}
 
+    # ------------------------------------------------------------------ LIN (UDS over LIN)
+    def _lin_master(self):
+        if self._lin is None:
+            raise OpsError("LIN 通道还没有打开：先调用 lin_open")
+        return self._lin["master"]
+
+    def lin_open(self, kind: str = "sim", channel: int = 0, baud: int = 19200, device: str = "", dll: str = "") -> Dict[str, Any]:
+        """Open the LIN channel. kind = "sim" (simulated oil pump on NAD 21) | "zlg" (ZLG box LIN channel; needs the SDK LIN
+        definitions, not wired yet). baud: LIN bit rate, 19200 by default (valid 1000..20000)."""
+        if kind not in ("sim", "zlg"):
+            raise OpsError('kind 应为 "sim" 或 "zlg"')
+        baud = _int(baud, "LIN 波特率", 1000, 20000)
+        if self._lin is not None:
+            return {"message": "LIN 通道已打开", **self.lin_status()}
+        if kind == "sim":
+            master = linmod.SimLinMaster()
+        else:
+            from . import zlglin
+            try:
+                master = zlglin.open_zlg(dll, device, _int(channel, "通道", 0, 15), baud)
+            except linmod.LinError as e:
+                raise OpsError(str(e))
+        self._lin = {"master": master, "kind": kind, "channel": int(channel), "baud": baud}
+        return {"message": "LIN 通道已打开", **self.lin_status()}
+
+    def lin_close(self) -> Dict[str, Any]:
+        st, self._lin = self._lin, None
+        if st is not None:
+            try:
+                st["master"].close()
+            except Exception:
+                pass
+        return {"message": "LIN 通道已关闭" if st else "LIN 通道本来就没打开", **self.lin_status()}
+
+    def lin_status(self) -> Dict[str, Any]:
+        st = self._lin
+        return {"lin_open": st is not None, **({"kind": st["kind"], "channel": st["channel"], "baud": st["baud"]} if st else {})}
+
+    @staticmethod
+    def _nad(v: Any) -> int:
+        try:
+            n = int(str(v), 16) if isinstance(v, str) else int(v)
+        except ValueError:
+            raise OpsError(f"NAD 不是有效的十六进制数: {v!r}")
+        if not 0 <= n <= 0xFF:
+            raise OpsError("NAD 应在 00..FF")
+        return n
+
+    def lin_request(self, nad: str, pdu: str, parse: str = "hex", p2_ms: int = 300) -> Dict[str, Any]:
+        """One UDS request to the node `nad` (hex) over LIN (master request 3C / slave response 3D)."""
+        master = self._lin_master()
+        req = _hex(pdu, "请求报文")
+        if not req:
+            raise OpsError("请求报文为空")
+        if parse not in ("hex", "ascii", "dec"):
+            raise OpsError("parse 应为 hex / ascii / dec")
+        n = self._nad(nad)
+        r = linmod.request(master, n, req, _int(p2_ms, "p2_ms", 10, 10000) / 1000.0)
+        out: Dict[str, Any] = {"ok": r["ok"], "nad": f"{n:02X}", "request": fmt_hex(req)}
+        if r["ok"]:
+            data = bytes(r["data"])
+            s = default_skip(req)
+            out.update(response=fmt_hex(data), data=fmt_hex(data), value=render_result(data[s:], parse))
+        else:
+            out["error"] = r.get("error", "无响应")
+            if r.get("nrc") is not None:
+                out.update(response=fmt_hex(r["data"]), nrc=f"{r['nrc']:02X}", nrc_text=NRC_TEXT.get(r["nrc"], ""))
+        return out
+
+    def lin_scan_nodes(self, first: str = "01", last: str = "7D", p2_ms: int = 50) -> Dict[str, Any]:
+        """Probe every NAD in [first, last] with TesterPresent; lists the nodes that answered."""
+        master = self._lin_master()
+        a, b = self._nad(first), self._nad(last)
+        if a > b:
+            raise OpsError("起始 NAD 不能大于结束 NAD")
+        found = linmod.scan_nodes(master, a, b, _int(p2_ms, "p2_ms", 10, 2000) / 1000.0)
+        return {"nodes": [f"{n:02X}" for n in found], "count": len(found), "range": f"{a:02X}-{b:02X}"}
+
+    def lin_scan_pump(self, nad: str, dids: Optional[List[Any]] = None, session: bool = True, p2_ms: int = 300) -> Dict[str, Any]:
+        """Read the oil pump's information. Default DIDs: standard identification set (F187 零件号, F189/F195 软件版本,
+        F18A 供应商, F18C 序列号, F191/F193 硬件版本). `dids` = list of "F190" or {"did":"F190","label":"..","parse":"ascii|hex|dec|auto"}
+        for supplier-specific data (speed, temperature, ...)."""
+        master = self._lin_master()
+        items = None
+        if dids:
+            items = []
+            for d in dids:
+                if isinstance(d, dict):
+                    did, label, parse = d.get("did", ""), d.get("label", ""), d.get("parse", "auto")
+                else:
+                    did, label, parse = d, "", "auto"
+                b = _hex(did, "DID")
+                if len(b) != 2:
+                    raise OpsError(f"DID 应为 2 字节: {did!r}")
+                if parse not in ("auto", "ascii", "hex", "dec"):
+                    raise OpsError("parse 应为 auto / ascii / hex / dec")
+                items.append((int.from_bytes(b, "big"), label or fmt_hex(b), parse))
+        return linmod.scan_pump(master, self._nad(nad), items, bool(session), _int(p2_ms, "p2_ms", 10, 10000) / 1000.0)
+
     # ------------------------------------------------------------------ lifecycle
     def shutdown(self) -> None:
         self.flow_stop()
@@ -819,4 +921,5 @@ METHODS = ["status", "device_list", "device_open", "device_close", "channel_star
            "keepalive_start", "keepalive_stop", "modules", "scan", "function_run", "function_start", "function_status", "function_stop",
            "frame_send", "cyclic_start", "cyclic_stop", "cyclic_list",
            "monitor_trace", "monitor_snapshot", "monitor_capture", "monitor_clear", "record_start", "record_stop",
-           "settings_get", "settings_set", "flow_start", "flow_status", "flow_stop"]
+           "settings_get", "settings_set", "flow_start", "flow_status", "flow_stop",
+           "lin_open", "lin_close", "lin_status", "lin_request", "lin_scan_nodes", "lin_scan_pump"]

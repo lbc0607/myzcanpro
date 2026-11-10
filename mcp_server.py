@@ -299,6 +299,41 @@ async def channel_stop(channel: int) -> Dict[str, Any]:
     return await call("channel_stop", channel=channel)
 
 
+# --------------------------------------------------------------------------- LIN (UDS over LIN, oil pump scan)
+@mcp.tool()
+async def lin_open(kind: str = "sim", channel: int = 0, baud: int = 19200, device: str = "", dll: str = "") -> Dict[str, Any]:
+    """Open the LIN channel. kind='sim' = simulated oil pump (NAD 21) for a dry run; kind='zlg' = the ZLG box's LIN channel
+    (the low-level binding still needs the SDK's LIN definitions and reports that). baud default 19200."""
+    return await call("lin_open", kind=kind, channel=channel, baud=baud, device=device, dll=dll)
+
+
+@mcp.tool()
+async def lin_close() -> Dict[str, Any]:
+    """Close the LIN channel."""
+    return await call("lin_close")
+
+
+@mcp.tool()
+async def lin_request(nad: str, pdu: str, parse: str = "hex", p2_ms: int = 300) -> Dict[str, Any]:
+    """One UDS request over LIN to the node with NAD `nad` (hex, e.g. '21'), PDU hex such as '22 F1 87'
+    (transport: master request 0x3C / slave response 0x3D, multi-frame supported). Returns ok, data, value or nrc / error."""
+    return await call("lin_request", nad=nad, pdu=pdu, parse=parse, p2_ms=p2_ms)
+
+
+@mcp.tool()
+async def lin_scan_nodes(first: str = "01", last: str = "7D", p2_ms: int = 50) -> Dict[str, Any]:
+    """Find the LIN nodes that answer UDS: TesterPresent to every NAD in [first, last] (hex)."""
+    return await call("lin_scan_nodes", first=first, last=last, p2_ms=p2_ms)
+
+
+@mcp.tool()
+async def lin_scan_pump(nad: str, dids: Optional[List[Any]] = None, session: bool = True, p2_ms: int = 300) -> Dict[str, Any]:
+    """Read the oil pump's information from node `nad` (hex). Default: the standard identification DIDs (F187 part number, F189/F195
+    software, F18A supplier, F18C serial, F191/F193 hardware). For supplier-specific data pass dids as ['F190', {'did':'F40C',
+    'label':'转速','parse':'dec'}] - the DIDs of the pump come from its supplier, ask the user when unknown."""
+    return await call("lin_scan_pump", nad=nad, dids=dids, session=session, p2_ms=p2_ms)
+
+
 # --------------------------------------------------------------------------- diagnostics
 @mcp.tool()
 async def uds_request(channel: int, pdu: str, module: str = "", phys: str = "", resp: str = "", func: str = "",

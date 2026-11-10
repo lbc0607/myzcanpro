@@ -118,3 +118,9 @@ Claude Code：`claude mcp add canvds -e CANVDS_HOME=D:/myzcanpro -- python D:/my
 **命令行**（不支持 MCP 的 agent 通过 shell 调用，只用标准库）：流程相关 `python -m zdiag.cli format | catalog | list | check FILE | outline FILE | run FILE [--simulate]`；其余操作可直接 POST 到本机端口（`POST /call {"method": "...", "params": {...}}`，头 `Authorization: Bearer <令牌>`，方法名见 `zdiag/ops.py` 的 METHODS）。
 
 **从报文生成烧写功能**：把烧写时抓的报文（ZCANPro / CanVDS 保存的 CSV、Vector ASC、`7E2 02 10 03 ...` 一行一帧的文本均可）给 agent，它会：`analyze_trace`（重组 ISO-TP、配对请求/响应、忽略总线上其它周期报文；36 传输数据自动折叠）→ 生成步骤草稿（会话/解锁/Flash driver/擦除/下载/CRC/自定义例程/复位/延时，多段下载合并为一个步骤）→ 列出报文里不可能有的待补项（烧写文件、密钥 DLL、CRC 算法）→ 你确认后 `save_function` 存进指定模块的「功能」。已用模拟 ECU 做过闭环：录下一次完整烧写 → 生成功能 → 补全 → 重新烧写成功。在软件扫描窗口里重新打开/刷新模块后可以看到新建的功能。
+
+## LIN 诊断（扫描油泵等 LIN 节点）
+UDS over LIN：传输层为 NAD + PCI，主请求帧 0x3C / 从应答帧 0x3D（经典校验和），支持单帧/多帧，复用现有 UDS 客户端（NRC 0x78 等照常处理）。
+- 工具（MCP / 本机端口，方法名相同）：`lin_open`（kind=sim 模拟油泵 NAD 21 / kind=zlg）、`lin_close`、`lin_request`（对某 NAD 发任意 UDS，如 `22 F1 87`）、`lin_scan_nodes`（TesterPresent 逐个 NAD 探测）、`lin_scan_pump`（读油泵信息：默认标准标识 DID F187/F189/F18A/F18C/F191/F193/F195，可自定义 DID 与解析方式）。
+- 代码：`zdiag/lin.py`（传输、模拟从节点、扫描）、`zdiag/zlglin.py`（周立功 LIN 通道绑定，**尚未接入**：需要设备 SDK 中 zlgcan.h 的 LIN 结构体定义，不能凭记忆猜内存布局）。
+- 现状：以上在模拟器上验证；真机需要补 `zlglin.py`，并确认油泵的 NAD、波特率（默认 19200）、校验模式和油泵专有 DID。
