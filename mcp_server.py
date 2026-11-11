@@ -1,5 +1,5 @@
 """CanVDS MCP server (stdio): lets any MCP-capable agent operate the host - devices / channels, UDS, raw frames, monitor,
-settings, 软件扫描, and the 流程编排 flows (write, validate, save, run).
+settings, 软件扫描 (modules / 功能, incl. creating a 功能 from a recorded trace) and LIN diagnostics.
 
     pip install -r requirements-mcp.txt          (Python >= 3.10)
     python mcp_server.py
@@ -8,7 +8,7 @@ The server is a thin bridge to the CanVDS local port (zdiag.rpc).  It uses, in t
   1. CANVDS_URL + CANVDS_TOKEN            an explicit endpoint
   2. <CANVDS_HOME>/CanVDS_rpc.json        written by a running CanVDS window (设置 → 允许 agent 连接) or `python -m zdiag.daemon`
   3. a headless daemon it starts itself    (set CANVDS_AUTOSTART=0 to forbid that)
-Environment: CANVDS_HOME (folder with scan_data/, default: this folder), CANVDS_FLOW_DIR (flows, default <HOME>/flows),
+Environment: CANVDS_HOME (folder with scan_data/, default: this folder),
 CANVDS_PYTHON (interpreter for the auto-started daemon: the 32-bit Python that can load zlgcan.dll)."""
 import asyncio
 import atexit
@@ -18,14 +18,15 @@ import os
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 os.environ.setdefault("CANVDS_HOME", HERE)
 
-from zdiag import flowapi, funcapi                         # noqa: E402
-from zdiag.flow import FlowError                           # noqa: E402
+from zdiag import funcapi                         # noqa: E402
+from zdiag.funcapi import FuncError                         # noqa: E402
+from zdiag.paths import home_dir                            # noqa: E402
 from zdiag.rpc import RpcError, ping, read_endpoint, rpc_call   # noqa: E402
 
 try:
@@ -35,17 +36,16 @@ except ImportError:                                        # mcp 1.x
 
 mcp = MCPServer("canvds", instructions=(
     "Operate the CanVDS diagnostic host. Typical order: get_status → device_open (模拟ECU(测试) for a dry run) → channel_start → "
-    "uds_request / scan_module / send_frame / monitor_* . For multi-step jobs write a flow (get_flow_format, get_catalog, "
-    "validate_flow, save_flow, run_flow). Tools act on the real device / bus (the simulator device is for dry runs). Do what the user asks directly; only ask when a required "
-    "parameter is missing - for flashing: files, key DLL, CRC algorithm and erase range must come from the user, not be guessed."))
+    "uds_request / scan_module / send_frame / monitor_* . For multi-step jobs use 功能 (get_function_format, save_function, "
+    "start_function). Tools act on the real device / bus (the simulator device is for dry runs). Do what the user asks directly; only ask when a required "
+    "parameter is missing - for flashing: files, key DLL (global setting security.key_dll), CRC algorithm and erase range must come from the user, not be guessed."))
 
-FlowArg = Union[Dict[str, Any], str]
 _daemon: Optional[subprocess.Popen] = None
 
 
 # --------------------------------------------------------------------------- connection to CanVDS
 def _home() -> str:
-    return flowapi.home_dir()
+    return home_dir()
 
 
 def _endpoint() -> Dict[str, str]:
@@ -99,53 +99,9 @@ def _guard(fn):
     def w(*a, **k):
         try:
             return fn(*a, **k)
-        except FlowError as e:
+        except FuncError as e:
             return {"ok": False, "error": str(e)}
     return w
-
-
-# --------------------------------------------------------------------------- flows: write / validate / save
-@mcp.tool()
-def get_flow_format() -> str:
-    """Describe the flow JSON format (structure, node types and fields, conditions) with an example. Read this before writing a flow."""
-    return flowapi.FORMAT_DOC
-
-
-@mcp.tool()
-@_guard
-def get_catalog() -> Dict[str, Any]:
-    """List what exists on this machine for flows: ECU modules and their functions, scan fields, devices, operators, limits.
-    Flows may only reference module / function names listed here."""
-    return flowapi.catalog()
-
-
-@mcp.tool()
-@_guard
-def validate_flow(flow: FlowArg) -> Dict[str, Any]:
-    """Validate a flow (JSON object or text). Returns ok, a list of errors to fix, and an indented outline of the steps."""
-    return flowapi.check(flow)
-
-
-@mcp.tool()
-@_guard
-def save_flow(name: str, flow: FlowArg, overwrite: bool = False, allow_invalid: bool = False) -> Dict[str, Any]:
-    """Save a flow as flows/<name>.json (name has no folders). Only valid flows are saved unless allow_invalid=true (draft).
-    The user then opens it in CanVDS 流程编排 → 打开."""
-    return flowapi.save(flow, name, None, overwrite, allow_invalid)
-
-
-@mcp.tool()
-@_guard
-def load_flow(name: str) -> Dict[str, Any]:
-    """Read a saved flow (JSON + outline), e.g. to modify it."""
-    return flowapi.load(name)
-
-
-@mcp.tool()
-@_guard
-def list_flows() -> Dict[str, Any]:
-    """List the saved flows."""
-    return {"flows": flowapi.list_flows()}
 
 
 # --------------------------------------------------------------------------- modules / 功能: create from a recorded trace
@@ -224,40 +180,6 @@ async def function_status() -> Dict[str, Any]:
 async def stop_function() -> Dict[str, Any]:
     """Cancel the running 功能 (a flash cancelled midway leaves the ECU in its bootloader: tell the user)."""
     return await call("function_stop")
-
-
-# --------------------------------------------------------------------------- flows: run
-@mcp.tool()
-async def run_flow(name: str = "", flow: Optional[FlowArg] = None, simulate: bool = False, wait_s: float = 60.0) -> Dict[str, Any]:
-    """Run a saved flow (`name`) or a `flow` object on the shared device and wait up to wait_s seconds for it to finish; if it is
-    still running the current state is returned - poll flow_status. simulate=true replaces 打开设备 with the simulated ECU
-    (safe dry run). Without it the flow operates the real device and bus."""
-    if isinstance(flow, str):
-        try:
-            flow = json.loads(flow)
-        except ValueError as e:
-            return {"ok": False, "error": f"flow 不是有效的 JSON: {e}"}
-    r = await call("flow_start", flow=flow, name=name or None, simulate=simulate or None)
-    if r.get("error") or not r.get("started", False):
-        return r
-    end = time.time() + max(0.0, min(float(wait_s), 600.0))
-    while True:
-        st = await call("flow_status")
-        if st.get("state") != "running" or time.time() >= end:
-            return st
-        await asyncio.sleep(0.3)
-
-
-@mcp.tool()
-async def flow_status() -> Dict[str, Any]:
-    """State of the running / last flow: per-step state and returned text, failed steps."""
-    return await call("flow_status")
-
-
-@mcp.tool()
-async def stop_flow() -> Dict[str, Any]:
-    """Stop the running flow."""
-    return await call("flow_stop")
 
 
 # --------------------------------------------------------------------------- device / channels
@@ -383,9 +305,10 @@ async def session_control(channel: int, session: str = "03", module: str = "") -
 
 
 @mcp.tool()
-async def security_unlock(channel: int, dll: str, level: int = 1, module: str = "") -> Dict[str, Any]:
-    """Security access (27 seed/key) with a key DLL path ('builtin:xor' = demo algorithm). Uses the global security settings."""
-    return await call("security_unlock", channel=channel, dll=dll, level=level, module=module or None)
+async def security_unlock(channel: int, level: int = 1, module: str = "", dll: str = "") -> Dict[str, Any]:
+    """Security access (27 seed/key). Uses the global key DLL (set once with set_settings section='security' values={'key_dll': path});
+    `dll` overrides it for this call only ('builtin:xor' = demo algorithm)."""
+    return await call("security_unlock", channel=channel, dll=dll or None, level=level, module=module or None)
 
 
 @mcp.tool()

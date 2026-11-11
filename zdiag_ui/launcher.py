@@ -41,8 +41,7 @@ class ChannelPanel(W.QFrame):
             h.addWidget(lb)
 
 
-TOOLS = [("uds", "UDS诊断"), ("flash", "ECU刷新"), ("scan", "软件扫描"), ("send", "普通发送"),
-         ("monitor", "报文监视"), ("flow", "流程编排"), ("crc", "校验码计算工具")]
+TOOLS = [("scan", "软件扫描"), ("send", "普通发送"), ("monitor", "报文监视"), ("crc", "校验码计算工具")]
 TITLES = dict(TOOLS)
 
 
@@ -108,10 +107,9 @@ class LauncherWindow(W.QMainWindow):
         brand.setObjectName("brand")
         bh.addWidget(brand)
         self.b_home = W.QPushButton("设备管理")
-        self.b_uds, self.b_flash, self.b_scan = W.QPushButton("UDS诊断"), W.QPushButton("ECU刷新"), W.QPushButton("软件扫描")
+        self.b_scan = W.QPushButton("软件扫描")
         self.b_send, self.b_mon, self.b_crc = W.QPushButton("普通发送"), W.QPushButton("报文监视"), W.QPushButton("校验码计算工具")
-        self.b_flow = W.QPushButton("流程编排")
-        for b in (self.b_home, self.b_uds, self.b_flash, self.b_scan, self.b_flow, self.b_send, self.b_mon, self.b_crc):
+        for b in (self.b_home, self.b_scan, self.b_send, self.b_mon, self.b_crc):
             bh.addWidget(b)
         bh.addStretch(1)
         outer.addWidget(bar)
@@ -137,8 +135,7 @@ class LauncherWindow(W.QMainWindow):
         self.tabs.tabBarDoubleClicked.connect(self._float_at)
         self.b_float.clicked.connect(lambda: self._float_at(self.tabs.currentIndex()))
         self.b_home.clicked.connect(lambda: self.tabs.setCurrentIndex(0))
-        for key, b in (("uds", self.b_uds), ("flash", self.b_flash), ("scan", self.b_scan), ("send", self.b_send),
-                       ("monitor", self.b_mon), ("flow", self.b_flow), ("crc", self.b_crc)):
+        for key, b in (("scan", self.b_scan), ("send", self.b_send), ("monitor", self.b_mon), ("crc", self.b_crc)):
             b.clicked.connect(lambda _=False, k=key: self._open(k))
         self._status()
 
@@ -330,9 +327,6 @@ class LauncherWindow(W.QMainWindow):
 
     # ------------------------------------------------------------------ tools as tabs
     def _make_tool(self, which: str):
-        if which == "uds":
-            from .diag_window import DiagWindow
-            return DiagWindow(self.ctx)
         if which == "scan":
             from .scan_window import ScanWindow
             return ScanWindow(self.ctx)
@@ -342,12 +336,6 @@ class LauncherWindow(W.QMainWindow):
         if which == "send":
             from .send_window import SendWindow
             return SendWindow(self.ctx)
-        if which == "flash":
-            from .flash_window import FlashWindow
-            return FlashWindow(self.ctx)
-        if which == "flow":
-            from .flow_window import FlowWindow
-            return FlowWindow(self.ctx)
         from .dialogs import CrcToolDialog
         d = CrcToolDialog(self.ctx)
         d.setWindowFlags(Qt.Widget)                    # a dialog would otherwise stay a separate window

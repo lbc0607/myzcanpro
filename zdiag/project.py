@@ -120,6 +120,7 @@ DEFAULT_ID_MAP = {"7e2": [0, 0], "7e3": [1, 2], "785": [2, 4], "645": [1, 3]}
 class SecurityCfg:
     """Security-access settings.  ONE object per program (AppContext.security), shared by every window and
     persisted in the program config - never part of a flash plan or a per-window copy."""
+    key_dll: str = ""               # the key (seed->key) DLL used by every 解锁 step; relative -> program folder
     serial_did: str = "F1 8C"       # DID read (22) for the ECU serial number written to the file's line 1
     serial_file: str = "EcuSerialNum.txt"
     serial_dir: str = ""            # folder of that file (= working folder of the key DLL); "" -> program folder
@@ -137,6 +138,10 @@ class SecurityCfg:
         if isinstance(d.get("id_map"), dict):
             c.id_map = {str(k).lower(): [int(x) for x in v] for k, v in d["id_map"].items()}
         return c
+
+    def key_path(self, base: str) -> str:
+        p = (self.key_dll or "").strip()
+        return p if not p or p.startswith("builtin:") or os.path.isabs(p) else os.path.normpath(os.path.join(base, p))
 
     def id_map_int(self) -> Dict[int, tuple]:
         return {int(k, 16): (int(v[0]), int(v[1])) for k, v in self.id_map.items()}
@@ -234,7 +239,7 @@ def step_summary(s: dict) -> str:
         return f"{s['ms']} ms"
     if t == "unlock":
         import os
-        return f"级别:{s['level']} DLL:{os.path.basename(s['dll']) if s['dll'] else ''}"
+        return f"级别:{s['level']} DLL:{os.path.basename(s['dll']) if s.get('dll') else '(全局设置)'}"
     if t in ("driver", "download"):
         import os
         return f"文件名:{os.path.basename(s['file']) if s['file'] else ''}"
@@ -307,3 +312,16 @@ def sample_project(product: str = "new") -> Project:
         new_step("service", name="ECU复位", pdu="11 01"),
     ]
     return p
+
+
+def read_global_key_dll(app_dir: str) -> str:
+    """The key DLL configured under 设置 → 安全访问 (read straight from the program config; "" when none)."""
+    import json
+    for name in ("CanVDS_config.json", "myzcanpro_config.json"):
+        try:
+            with open(os.path.join(app_dir, name), "r", encoding="utf-8") as f:
+                d = json.load(f)
+            return SecurityCfg.from_dict(d.get("security") or {}).key_path(app_dir)
+        except (OSError, ValueError, AttributeError):
+            continue
+    return ""

@@ -11,16 +11,12 @@ from zdiag.project import SIM_DEVICE, Project, new_step, sample_project
 from zdiag.crc import PRESETS
 from zdiag_ui.appctx import AppContext
 from zdiag_ui.launcher import LauncherWindow
-from zdiag_ui.diag_window import DiagWindow
 from zdiag_ui.send_window import SendWindow
 from zdiag_ui.monitor_window import MonitorWindow
 from zdiag_ui import scan_window as _sw
 from zdiag_ui.scan_window import ScanWindow
-from zdiag_ui.flash_window import FlashWindow, relativize
 from zdiag_ui.dialogs import CrcConfigWidget, CrcToolDialog, ServiceEditorDialog, SettingsDialog
 from zdiag_ui import qt as _qt
-from zdiag_ui.flow_window import FlowWindow
-from zdiag_ui import flow_dialog as _fd
 
 W.QApplication([])
 
@@ -225,14 +221,14 @@ class LauncherTests(Base):
         self.assertEqual((p.b_toggle.text(), self.ctx.dev.cfg_of(0).bitrate_kbps), ("停止", 250.0))
         self.assertIn("CAN 250k", p.l_state.text())
         self.assertEqual(self.ctx.chan_cfgs[0].bitrate_kbps, 250.0)                      # remembered
-        win = DiagWindow(self.ctx)
-        win.tree.setCurrentItem(self.tree_item(win, 0x10, 3)); win.e_pdu.setText("10 03"); win.b_now.click()
+        from zdiag.ops import Ops
+        ops = Ops(self.ctx); ops.uds_request(0, "10 03")
         w.refresh_stats()
         self.assertNotEqual(p.l_tx.text(), "发送: 0"); self.assertNotEqual(p.l_rx.text(), "接收: 0")
         self.assertEqual(p.l_err.text(), "错误: 0")
         import time; self.ctx.dev.stats_of(0).sample_load(time.monotonic())
         w.refresh_stats(); self.assertIn("总线负载", p.l_load.text())
-        win.close()
+        ops.shutdown()
         p.b_toggle.click()
         self.assertEqual((p.b_toggle.text(), p.l_rx.text(), p.l_load.text()), ("启动", "接收: 0", "总线负载: --"))
         w.close()
@@ -262,27 +258,9 @@ class LauncherTests(Base):
         w.b_device.click(); self.assertFalse(self.ctx.dev.is_open)
         w.close()
 
-    def test_diag_and_flash_windows_follow_started_channels(self):
-        win, fw = DiagWindow(self.ctx), FlashWindow(self.ctx)
-        self.assertEqual(win.c_ch.count(), 1); self.assertIn("通道0", win.c_ch.currentText())
-        self.ctx.dev.start_channel(1, ChannelCfg(protocol="CAN FD"), self.ctx.diag_cfg.addr)
-        self.assertEqual(win.c_ch.count(), 2); self.assertEqual(fw.executor.c_ch.count(), 2)
-        win.c_ch.setCurrentIndex(1)
-        self.assertEqual(self.ctx.channel.channel, 1)
-        self.ctx.dev.stop_channel(1)                              # selected channel disappears -> falls back
-        self.assertEqual((win.c_ch.count(), self.ctx.channel.channel), (1, 0))
-        self.ctx.dev.stop_channel(0)
-        self.assertEqual(win.c_ch.currentText(), "(无已启动通道)")
-        W.QMessageBox.calls.clear()
-        win.tree.setCurrentItem(self.tree_item(win, 0x10, 3)); win.e_pdu.setText("10 03"); win.b_now.click()
-        self.assertIn("启动", msgs("warn")[0][2])                  # nothing started -> tells the user what to do
-        n = len(self.ctx.dev.listeners)
-        win.close(); fw.close()
-        self.assertEqual(len(self.ctx.dev.listeners), n - 2)       # windows unsubscribe when closed
-
     def test_opens_all_tools(self):
         w = LauncherWindow(self.ctx)
-        for k in ("uds", "flash", "send", "crc"):
+        for k in ("scan", "send", "crc"):
             w._open(k)
             self.assertTrue(w.windows[k].isVisible())
         self.assertIn("zlgcan.dll", w.l_info.text())
@@ -292,27 +270,21 @@ class LauncherTests(Base):
     def test_tools_open_as_tabs_not_popups(self):
         w = LauncherWindow(self.ctx)
         self.assertEqual((w.tabs.count(), w.tabs.tabText(0)), (1, "设备管理"))
-        w.b_uds.click(); w.b_flash.click(); w.b_scan.click()
-        self.assertEqual([w.tabs.tabText(i) for i in range(w.tabs.count())], ["设备管理", "UDS诊断", "ECU刷新", "软件扫描"])
+        w.b_send.click(); w.b_mon.click(); w.b_scan.click()
+        self.assertEqual([w.tabs.tabText(i) for i in range(w.tabs.count())], ["设备管理", "普通发送", "报文监视", "软件扫描"])
         self.assertIs(w.tabs.widget(w.tabs.currentIndex()), w.windows["scan"])
-        w.b_uds.click()                                              # already open -> just focus its tab
+        w.b_send.click()                                             # already open -> just focus its tab
         self.assertEqual((w.tabs.count(), w.tabs.currentIndex()), (4, 1))
         w.b_home.click(); self.assertEqual(w.tabs.currentIndex(), 0)
+        self.assertFalse({"b_uds", "b_flash", "b_flow"} & set(vars(w)))      # 这三个界面已取消
         w.close()
 
-    def test_close_tab_and_veto_while_flashing(self):
-        w = LauncherWindow(self.ctx); w._open("send"); w._open("flash")
-        w.tabs.tabCloseRequested.emit(1) if False else w._close_tab_at(1)       # close the 普通发送 tab
-        self.assertEqual((w.tabs.count(), list(w.windows)), (2, ["flash"]))
+    def test_close_tab(self):
+        w = LauncherWindow(self.ctx); w._open("send"); w._open("monitor")
+        w._close_tab_at(1)                                                       # close the 普通发送 tab
+        self.assertEqual((w.tabs.count(), list(w.windows)), (2, ["monitor"]))
         w._close_tab_at(0)                                                       # the device-manager tab is permanent
         self.assertEqual(w.tabs.count(), 2)
-        fw = w.windows["flash"]
-        fw.executor.worker = type("R", (), {"isRunning": lambda s: True})()        # pretend a flash is running
-        self.assertFalse(w.close_tool("flash")); self.assertIn("flash", w.windows); self.assertEqual(w.tabs.count(), 2)
-        W.QMessageBox.calls.clear(); ev = type("E", (), {"ignored": False, "ignore": lambda s: setattr(s, "ignored", True),
-                                                          "accept": lambda s: None})()
-        w.closeEvent(ev); self.assertTrue(ev.ignored)                            # main window refuses to close, too
-        fw.executor.worker = None
         w.close(); self.assertEqual(w.windows, {})
 
     def test_float_and_dock_back(self):
@@ -333,149 +305,6 @@ class LauncherTests(Base):
         self.assertEqual((w.windows, w.floating), ({}, {}))
 
 
-class DiagWindowTests(Base):
-    def setUp(self):
-        super().setUp()
-        self.w = DiagWindow(self.ctx)
-        self.addCleanup(self.w.close)
-
-    def test_tree_and_pdu_fill(self):
-        w = self.w
-        self.assertEqual(w.tree.topLevelItem(0).text(0), "【原始报文】")
-        self.assertEqual(w.tree.topLevelItemCount(), 1 + len(self.ctx.services))
-        w.tree.setCurrentItem(self.tree_item(w, 0x10, 0x01))
-        self.assertEqual((w.e_pdu.text(), w.e_exp.text()), ("10 01", "50"))
-        w.tree.setCurrentItem(self.tree_item(w, 0x22))
-        self.assertEqual(w.e_pdu.text(), "22")
-
-    def send(self, pdu, exp="", check=True, sup=False, addr=0):
-        w = self.w
-        w.e_pdu.setText(pdu); w.e_exp.setText(exp)
-        w.c_chk.setCurrentIndex(1 if check else 0); w.c_sup.setCurrentIndex(1 if sup else 0)
-        w.c_addr.setCurrentIndex(addr)
-        w.b_now.click()
-
-    def test_send_pass_fail_unchecked_and_log(self):
-        w = self.w
-        self.send("10 03", "50")
-        self.send("10 03", "51")
-        self.send("99", "7F", check=True)               # NRC but expected positive-less pattern 7F -> passes
-        self.send("99", "", check=False)
-        c = w.counts
-        self.assertEqual((c["tested"], c["pass"], c["fail"], c["unchecked"]), (4, 2, 1, 1))
-        text = w.log.toPlainText()
-        self.assertIn("10 03", text); self.assertIn("50 03", text); self.assertIn("NRC 0x11", text)
-        self.assertIn("未通过", text)
-        self.assertEqual(w.l_tested.text(), "4")
-        w.b_reset.click(); self.assertEqual(w.l_tested.text(), "0")
-
-    def test_read_vin_multiframe_and_ascii_format(self):
-        w = self.w
-        self.send("22 F1 90", "62 F1 90")
-        self.assertEqual(w.counts["pass"], 1)
-        w.c_fmt.setCurrentIndex(1)                       # ASCII re-render
-        self.assertIn("LSVAB12345C000001", w.log.toPlainText())
-
-    def test_functional_suppress_does_not_hang(self):
-        self.send("3E 00", "", check=False, sup=True, addr=1)
-        self.assertEqual(w_counts(self.w), 1)
-
-    def test_list_send_loops_delay_and_stop_button(self):
-        w = self.w
-        for pdu, exp in (("10 03", "50"), ("22 F1 90", "62")):
-            w.e_pdu.setText(pdu); w.e_exp.setText(exp); w.c_chk.setCurrentIndex(1); w.b_add.click()
-        W.QInputDialog.next_int = 20
-        w.b_delay.click(); W.QInputDialog.next_int = None
-        self.assertEqual(len(w.rows), 3); self.assertEqual(w.table.rowCount(), 3)
-        self.assertEqual(w.table.item(2, 2).text(), "延时 20 ms")
-        w.s_loop.setValue(3); w.s_gap.setValue(0)
-        w.b_list.click()
-        self.assertEqual(w.counts["pass"], 6)
-        self.assertEqual(w.b_list.text(), "列表发送")
-        # uncheck first row -> only 3 passes next time
-        w.table.item(0, 0).setCheckState(0)
-        self.assertFalse(w.rows[0]["enabled"])
-        w._reset_stats(); w.s_loop.setValue(1); w.b_list.click()
-        self.assertEqual(w.counts["pass"], 1)
-
-    def test_list_edit_move_delete_import_export(self):
-        w = self.w
-        for pdu in ("10 01", "10 02", "10 03"):
-            w.e_pdu.setText(pdu); w.b_add.click()
-        w.table.selectRow(2); w._move(-1)
-        self.assertEqual([r["pdu"] for r in w.rows], ["10 01", "10 03", "10 02"])
-        w.table.item(0, 1).setText("会话1")
-        self.assertEqual(w.rows[0]["name"], "会话1")
-        w.table.selectRow(1); w._delete_row(); self.assertEqual(len(w.rows), 2)
-        p = os.path.join(tempfile.mkdtemp(), "l.json"); W.QFileDialog.next_path = p
-        w.b_exp.click()
-        w.b_clear.click(); self.assertEqual(w.table.rowCount(), 0)
-        w.b_imp.click(); self.assertEqual([r["pdu"] for r in w.rows], ["10 01", "10 02"])
-        w.table.item(0, 2).setText("zz")
-        self.assertTrue(msgs("warn"))
-
-    def test_bad_input_is_reported_not_crash(self):
-        self.send("1G")
-        self.assertTrue(msgs("warn")); self.assertEqual(self.w.counts["tested"], 0)
-        W.QMessageBox.calls.clear()
-        self.w.e_phys.setText("xyz"); self.w.e_phys.editingFinished.emit()
-        self.assertTrue(msgs("warn")); self.assertEqual(self.w.e_phys.text(), "7e2")
-
-    def test_address_change_reaches_ecu(self):
-        w = self.w
-        for e, v in ((w.e_phys, "7e3"), (w.e_resp, "7eb")):
-            e.setText(v); e.editingFinished.emit()
-        self.assertEqual((self.ctx.diag_cfg.addr.phys, self.ctx.diag_cfg.addr.resp), (0x7E3, 0x7EB))
-        self.send("10 03", "50")
-        self.assertEqual(w.counts["pass"], 1)            # a new simulator was built for the new IDs
-
-    def test_no_zlg_dll_gives_clear_message(self):
-        self.ctx.dev.shutdown()
-        with self.assertRaises(ConnError) as e:
-            self.ctx.dev.open("USBCAN-II")
-        self.assertIn("zlgcan.dll", str(e.exception))
-        self.send("10 03", "50")                                  # no started channel -> clear message
-        self.assertIn("启动", msgs("warn")[0][2]); self.assertEqual(self.w.counts["tested"], 0)
-
-    def test_settings_dialog_roundtrip_and_validation(self):
-        cfg, ch = self.ctx.diag_cfg, self.ctx.channel
-        d = SettingsDialog(self.ctx, cfg, ch)
-        self.assertEqual(d.e_phys.text(), "7e2"); self.assertEqual(d.a_p2.text(), "800")
-        d.a_p2.setText("1234"); d.a_pad_on.setChecked(False); d.k_on.setChecked(True); d.k_period.setText("500")
-        d.a_rxpad.setText("cc"); d.t_map.setRowCount(0); d._map_row("7e2","5","6"); d._map_row("7e8","2","4"); d._map_row("", "", "")
-        d.e_sdid.setText("f1 90"); d.e_sfile.setText("Sn.txt"); d.c_sfmt.setCurrentIndex(1); d.ch_fddl.setCurrentText("32")
-        d.btn_ok.click()
-        self.assertEqual((cfg.settings.p2_ms, cfg.settings.padding_enabled, cfg.keepalive.period_ms), (1234, False, 500))
-        self.assertEqual((cfg.settings.rx_padding, cfg.settings.padding), (0xCC, 0x55)); sec = self.ctx.security; self.assertEqual(sec.id_map, {"7e2": [5, 6], "7e8": [2, 4]}); self.assertEqual((sec.serial_did, sec.serial_file, sec.serial_format), ("F1 90", "Sn.txt", "hex")); self.assertEqual((ch.fd_dl, ch.sim_profile), (32, "new"))
-        d2 = SettingsDialog(self.ctx, cfg, ch)
-        d2.a_p2.setText("abc"); d2.e_phys.setText("1fff")
-        W.QMessageBox.calls.clear(); d2.btn_ok.click()
-        self.assertTrue(msgs("warn")); self.assertEqual(cfg.settings.p2_ms, 1234)       # nothing half-applied
-        d3 = SettingsDialog(self.ctx, cfg, ch); d3.e_phys.setText("7e5"); d3._map_row("zz","1","1")
-        d3.btn_ok.click(); self.assertEqual(cfg.addr.phys, 0x7E2)
-
-    def test_keepalive_runs_with_session(self):
-        self.ctx.diag_cfg.keepalive.enabled = True; self.ctx.diag_cfg.keepalive.period_ms = 50
-        self.send("10 03", "50")
-        self.assertIsNotNone(self.w.session)
-        self.assertTrue(self.w.session.uds._ka_thread is not None)
-
-    def test_service_editor_changes_tree(self):
-        d = ServiceEditorDialog(self.ctx, self.w)
-        d.b_add.click()
-        d.e_sid.setText("BA"); d.e_name.setText("厂商服务"); d._sub_row("01", "子功能")
-        d.b_ok.click()
-        self.assertEqual(self.ctx.services[-1]["sid"], 0xBA)
-        self.assertTrue(os.path.isfile(self.ctx.services_path))
-        self.w._load_tree(); self.assertEqual(self.w.tree.topLevelItemCount(), 1 + len(self.ctx.services))
-        d2 = ServiceEditorDialog(self.ctx, self.w); d2.b_def.click(); d2.b_ok.click()
-        self.assertEqual(self.ctx.services[0]["sid"], 0x10)
-
-
-def w_counts(w):
-    return w.counts["tested"]
-
-
 class MonitorTests(Base):
     def setUp(self):
         super().setUp()
@@ -486,9 +315,8 @@ class MonitorTests(Base):
         return [[t.item(r, c).text() for c in range(t.columnCount())] for r in range(t.rowCount())]
 
     def traffic(self):
-        win = DiagWindow(self.ctx)
-        win.tree.setCurrentItem(self.tree_item(win, 0x10, 3)); win.e_pdu.setText("10 03"); win.b_now.click()
-        win.close()
+        from zdiag.ops import Ops
+        ops = Ops(self.ctx); ops.uds_request(0, "10 03"); ops.shutdown()
 
     def test_shows_uds_traffic_overwriting_by_id(self):
         self.traffic(); self.traffic()
@@ -536,153 +364,6 @@ class MonitorTests(Base):
     def test_launcher_button_opens_it(self):
         L = LauncherWindow(self.ctx); L._open("monitor")
         self.assertTrue(L.windows["monitor"].isVisible()); L.close_tool("monitor"); L.close()
-
-
-class FlowTests(Base):
-    def setUp(self):
-        super().setUp()
-        self.ctx.scan_dir = tempfile.mkdtemp()
-        self.w = FlowWindow(self.ctx); self.addCleanup(self.w.close)
-        self.prep = None
-
-    def select(self, pred):
-        for r, row in enumerate(self.w.rows):
-            if pred(row):
-                self.w.table.selectRow(r); return row
-        raise KeyError
-
-    def sel_node(self, name):
-        return self.select(lambda r: r["kind"] == "node" and r["node"]["name"] == name)
-
-    def add(self, kind, setup=None):
-        """Click 添加 for `kind`; the dialog is answered by `setup(dialog)` then 确定."""
-        orig = _fd.NodeDialog.exec_
-        def fake(d):
-            if setup: setup(d)
-            d._on_ok(); return d.result is not None
-        _fd.NodeDialog.exec_ = fake
-        try:
-            self.w.c_type.setCurrentIndex(self.w.c_type.findData(kind)); self.w.b_add.click()
-        finally:
-            _fd.NodeDialog.exec_ = orig
-
-    def names(self):
-        return [r["node"]["name"] for r in self.w.rows if r["kind"] == "node"]
-
-    def test_flowchart_selection_edit_and_state(self):
-        v = self.w.view
-        self.assertEqual(self.w.stack.currentIndex(), 0)                       # flowchart is the default view
-        lane = [n for n in self.w.flow.walk() if n["type"] == "lane"][0]
-        v.mousePressEvent(type("E", (), {"pos": lambda s: (0, 0)})())          # empty area: no change
-        self.w._pick(lane["id"]); self.assertEqual(self.w._cur()["node"]["id"], lane["id"])
-        self.assertEqual(v.selected, lane["id"])
-        self.w._pick(lane["id"] + ":children")                                 # empty-lane placeholder selects the lane
-        self.assertEqual(self.w._cur()["node"]["id"], lane["id"])
-        self.add("delay", lambda d: d.e_seconds.setText("0"))                  # add works from a flowchart selection
-        d = [n for n in self.w.flow.walk() if n["type"] == "delay"][-1]
-        self.assertEqual(v.selected, d["id"])
-        sh = [s for s in v.lay.shapes if s.node == d["id"]][0]
-        v.mousePressEvent(type("E", (), {"pos": lambda s: (sh.x + 5, sh.y + 5)})())
-        self.assertEqual(self.w._cur()["node"]["id"], d["id"])
-        from zdiag.flowrun import FlowEvent
-        self.w._on_event(FlowEvent(d["id"], "ok", "done"))
-        self.assertEqual(self.w.state[d["id"]][0], "ok")
-        self.assertIn("ok: done", v.bodies[d["id"]].tip)
-        self.assertEqual(v.bodies[d["id"]].brush.a[0].a[0], "#D5F5E3")
-        self.w.b_view.click(); self.assertEqual(self.w.stack.currentIndex(), 1)
-        self.w.b_view.click(); self.assertEqual(self.w.stack.currentIndex(), 0)
-
-    def test_starter_flow_and_adding_rules(self):
-        self.assertEqual(self.names(), ["准备", "打开设备", "启动通道", "通道0"])
-        W.QMessageBox.calls.clear()
-        self.sel_node("通道0"); self.add("open_device")                    # setup-only step into a lane
-        self.assertTrue(msgs("warn")); self.assertEqual(len(self.names()), 4)
-        self.sel_node("准备"); W.QMessageBox.calls.clear(); self.add("scan")
-        self.assertTrue(msgs("warn"))
-        self.sel_node("准备"); self.add("delay", lambda d: d.e_seconds.setText("0"))                   # allowed in 准备
-        self.assertEqual(self.names()[:4], ["准备", "打开设备", "启动通道", "延时"])
-        self.w.table.selectRow(-1); self.w.table._cur = -1
-        self.add("lane"); self.assertEqual(self.w.flow.lanes()[-1]["channel"], 1)                       # next free channel
-        self.assertTrue(self.w.dirty)
-
-    def build_example(self):
-        w = self.w
-        self.sel_node("通道0")
-        self.add("scan", lambda d: d.module.setCurrentIndex(0))
-        self.add("uds", lambda d: (d.c_preset.setCurrentIndex(1), d.e_name.setText("复位")))
-        self.add("delay", lambda d: d.e_seconds.setText("0.05"))
-        self.add("function", lambda d: d.c_path.setCurrentIndex(max(d.c_path.findData("故障检测"), 0)))
-        scan_id = [r["node"]["id"] for r in w.rows if r["node"]["type"] == "scan"][0]
-        self.sel_node("软件扫描")
-        self.add("if", lambda d: (d.cond.c_ref.setCurrentIndex(d.cond.c_ref.findData(scan_id)),
-                                  d.cond.c_field.setCurrentIndex(d.cond.c_field.findData("dtc")),
-                                  d.cond.c_op.setCurrentIndex(d.cond.c_op.findData("gt")), d.cond.e_val.setText("0"),
-                                  d.e_name.setText("有故障码?")))
-        self.select(lambda r: r["kind"] == "group" and r["label"] == "成立时")
-        self.add("function", lambda d: (d.c_path.setCurrentIndex(max(d.c_path.findData("清除故障"), 0)), d.e_name.setText("清除")))
-        return scan_id
-
-    def test_build_run_and_results(self):
-        w = self.w
-        self.build_example()
-        self.assertEqual(w.flow.lanes()[0]["children"][1]["name"], "有故障码?")                          # inserted after the scan
-        self.assertEqual([n["name"] for n in w.flow.lanes()[0]["children"][1]["then"]], ["清除"])
-        w.b_run.click()
-        self.assertIsNone(w.worker); self.assertTrue(w.l_status.text().startswith("✔"), w.l_status.text())
-        st = {r["node"]["name"]: w.table.cell_texts(i) for i, r in enumerate(w.rows) if r["kind"] == "node"}
-        for name in ("打开设备", "启动通道", "软件扫描", "复位", "延时", "有故障码?", "清除", "执行功能"):
-            self.assertIn("成功", st[name][3], name)
-        self.assertTrue(all(v[0] == "ok" for v in w.state.values()), w.state)
-        scan_row = st["软件扫描"]
-        self.assertIn("软件编码=", scan_row[4]); self.assertIn("故障码数量=", scan_row[4])
-        self.assertTrue(w.b_run.isEnabled() and not w.b_stop.isEnabled())
-        w.b_clear.click(); self.assertEqual(w.state, {})
-
-    def test_edit_move_duplicate_toggle_delete_save_open(self):
-        w = self.w
-        self.sel_node("通道0"); self.add("delay", lambda d: d.e_seconds.setText("1")); self.add("delay", lambda d: (d.e_seconds.setText("2"), d.e_name.setText("第二个")))
-        self.sel_node("延时"); w.b_edit.click()                                                              # stub exec_ returns 1, result None -> unchanged
-        self.sel_node("第二个"); w.b_up.click(); self.assertEqual(self.names()[-2:], ["第二个", "延时"])
-        w.b_down.click(); self.assertEqual(self.names()[-2:], ["延时", "第二个"])
-        w.b_dup.click(); self.assertEqual(self.names()[-1], "第二个 副本")
-        ids = [n["id"] for n in w.flow.walk()]; self.assertEqual(len(ids), len(set(ids)))
-        self.sel_node("第二个 副本"); w.b_toggle.click()
-        self.assertFalse(w.flow.find(w.rows[w.table.currentRow()]["node"]["id"])["enabled"])
-        self.assertIn("已禁用", w.table.cell_texts(w.table.currentRow())[0])
-        path = os.path.join(tempfile.mkdtemp(), "demo.json"); W.QFileDialog.next_path = path
-        w.b_save.click(); self.assertTrue(os.path.exists(path)); self.assertFalse(w.dirty)
-        self.sel_node("第二个 副本"); w.b_del.click(); self.assertNotIn("第二个 副本", self.names()); self.assertTrue(w.dirty)
-        W.QFileDialog.next_path = path; w.b_open.click()
-        self.assertIn("第二个 副本", self.names()); self.assertEqual(w.flow.name, "demo")
-        self.sel_node("准备"); w.b_del.click(); self.assertNotIn("准备", self.names())                      # container + children go together
-        W.QMessageBox.next_answer = W.QMessageBox.No; before = list(self.names()); w.b_new.click()            # dirty -> asked, declined
-        self.assertEqual(self.names(), before)
-        W.QMessageBox.next_answer = W.QMessageBox.Yes; w.b_new.click(); self.assertEqual(self.names()[0], "准备")
-
-    def test_invalid_flow_is_not_run_and_cond_dialog_needs_a_source(self):
-        w = self.w
-        self.sel_node("准备"); w.b_del.click(); self.sel_node("通道0"); W.QMessageBox.calls.clear()
-        self.add("if")                                                                                       # no step with a result to refer to
-        self.assertTrue(msgs("warn")); self.assertNotIn("条件分支", self.names())
-        self.add("scan", lambda d: d.module.setCurrentIndex(0))
-        w.flow.lanes()[0]["children"][0]["module"] = "不存在"; W.QMessageBox.calls.clear()
-        w.b_run.click(); self.assertTrue(msgs("warn")); self.assertIsNone(w.worker); self.assertEqual(w.state, {})
-
-    def test_stop_and_close_while_running(self):
-        w = self.w
-        self.sel_node("通道0"); self.add("delay", lambda d: d.e_seconds.setText("30"))
-        w.cancel = None; w._stop()                                                                           # no run: harmless
-        class Running:                                                                                       # pretend a run is in progress
-            def isRunning(self): return True
-            def wait(self, *a): pass
-        w.worker = Running(); import threading as _t; w.cancel = _t.Event()
-        W.QMessageBox.next_answer = W.QMessageBox.No; self.assertFalse(w.close()); self.assertFalse(w.cancel.is_set())
-        W.QMessageBox.next_answer = W.QMessageBox.Yes; self.assertTrue(w.close()); self.assertTrue(w.cancel.is_set())
-        w.worker = None
-
-    def test_tab_in_launcher(self):
-        L = LauncherWindow(self.ctx); self.addCleanup(L.close)
-        L.b_flow.click(); self.assertIn("flow", L.windows); self.assertTrue(L.close_tool("flow"))
 
 
 class ScanTests(Base):
@@ -817,193 +498,77 @@ class ScanTests(Base):
         self.assertTrue(L.windows["scan"].isVisible()); L.close_tool("scan"); L.close()
 
 
-class FlashTests(Base):
+class StepEditorTests(Base):
     def setUp(self):
         super().setUp()
-        self.w = FlashWindow(self.ctx)
-        self.addCleanup(self.w.close)
-        self.tmp = tempfile.mkdtemp()
-        self.fw = os.path.join(self.tmp, "app.bin"); self.drv = os.path.join(self.tmp, "drv.bin")
-        open(self.fw, "wb").write(os.urandom(2500)); open(self.drv, "wb").write(os.urandom(600))
-        self.ctx.diag_cfg.settings.p2_ms = 800
+        from zdiag_ui.exec_editor import ExecEditorPage
+        from zdiag.scanlib import Executor
+        self.page = ExecEditorPage(self.ctx, lambda ex: True, lambda ex: None, lambda: None)
+        self.page.load(Executor(), "t"); self.addCleanup(self.page.close)
+        self.e = self.page.editor
 
-    def prep(self, product="new", mutate=None):
-        w = self.w
-        self.ctx.channel.sim_profile = product
-        p = sample_project(product)
-        p.cfg.settings.p2_ms = 800
-        for s in p.steps:
-            if s["type"] == "unlock": s["dll"] = "builtin:xor"
-            if s["type"] == "driver": s["file"] = self.drv
-            if s["type"] == "download": s["file"] = self.fw
-        if mutate: mutate(p)
-        w.project = p; w.editor.refresh(); w.apply_to_executor()
+    def names(self):
+        return [s["name"] for s in self.e.project.steps]
 
-    def run_exec(self):
-        self.w.executor.b_start.click()
+    def add_service(self, name):
+        i = next(i for i, (sv, _) in enumerate(self.e.forms) if sv["sid"] == 0x10)
+        self.e.lst.setCurrentRow(i); f = self.e.forms[i][1]
+        f.e_desc.setText(name); self.e.b_add.click()
 
-    def card_colors(self):
-        return [it._bg.a[0].a[0] for it in (self.w.executor.cards.item(i) for i in range(self.w.executor.cards.count()))]
+    def test_new_steps_go_below_the_selected_one(self):
+        self.add_service("A"); self.add_service("B"); self.add_service("C")
+        self.assertEqual(self.names(), ["A", "B", "C"])                    # nothing selected -> appended; the new step is selected
+        self.assertEqual(self.e.table.currentRow(), 2)
+        self.e.table.selectRow(0); self.add_service("X")
+        self.assertEqual(self.names(), ["A", "X", "B", "C"]); self.assertEqual(self.e.table.currentRow(), 1)
+        self.add_service("Y")                                              # continues right below the previous new step
+        self.assertEqual(self.names(), ["A", "X", "Y", "B", "C"])
+        self.e.table.selectRow(3); self.e.e_delay.setText("250"); self.e.b_delay.click()
+        self.assertEqual([s["type"] for s in self.e.project.steps][4], "delay"); self.assertEqual(self.e.table.currentRow(), 4)
+        self.assertEqual(len(self.e.project.steps), 6)
 
-    def test_editor_shows_sample_like_screenshot(self):
-        e = self.w.editor
-        self.assertEqual(e.table.rowCount(), 10)
-        self.assertEqual([e.table.item(r, 0).text() for r in (0, 1, 4, 6, 8, 9)],
-                         ["进入扩展模式", "关闭DTC设置", "ECU解锁", "擦除内存", "CRC校验", "ECU复位"])
-        self.assertEqual(e.table.item(6, 1).text(), "31 01 FF 00 44 [起始地址][大小] 01")
-        self.assertEqual(e.table.item(8, 1).text(), "分段 31 01 01 02 + 全文件 31 01 01 03 [CRC32]")
-        self.assertIn("编辑器 - sample-new", self.w.tabs.tabText(0))
-
-    def test_select_row_loads_forms_and_update_changes_params(self):
-        e = self.w.editor
-        e.table.selectRow(4)                                     # unlock
-        self.assertEqual(e.lst.currentItem().text(0), "(27)安全访问") if False else None
-        form = e._current_form(); self.assertEqual(form.kind, "unlock"); self.assertEqual(form.e_level.text(), "1")
-        form.e_level.setText("3"); e.b_upd.click()
-        self.assertEqual(self.w.project.steps[4]["level"], 3)
-        self.assertEqual(e.table.item(4, 1).text(), "级别:3 DLL:sa_demo.dll")
-        e.table.selectRow(8)                                     # CRC routine -> change RIDs, mode and CRC type
-        f = e._current_form(); self.assertEqual((f.kind, f.kind_key()), ("routine", "crc"))
-        self.assertEqual((f.e_rid.text(), f.e_rid_file.text(), f.c_mode.currentData()), ("01 02", "01 03", "region"))
-        self.assertTrue(f.g_crc.isVisible() and not f.g_erase.isVisible() and not f.g_custom.isVisible())
-        f.e_rid.setText("DF FE"); f.e_rid_file.setText("DF FD"); f.c_mode.setCurrentIndex(1)
-        f.crc.combo.setCurrentText("CRC16/XMODEM"); f.c_order.setCurrentIndex(1); e.b_upd.click()
-        st = self.w.project.steps[8]
-        self.assertEqual((st["rid"], st["rid_file"], st["crc_mode"], st["crc_order"], st["crc"]["width"], st["crc"]["name"]),
-                         ("DF FE", "DF FD", "file", "little", 16, "CRC16/XMODEM"))
-        self.assertEqual(e.table.item(8, 1).text(), "全文件 31 01 DF FD [CRC16/XMODEM]")
-        e.table.selectRow(6)                                     # erase routine -> every parameter is editable
-        f = e._current_form(); self.assertEqual(f.kind_key(), "erase"); self.assertTrue(f.g_erase.isVisible() and not f.g_crc.isVisible())
-        self.assertEqual((f.e_rid.text(), f.e_ext.text(), f.k_ext.isChecked(), f.c_range.currentData()), ("FF 00", "01", True, "sum"))
-        self.assertIn("0x44", f.l_alfi.text())
-        f.e_rid.setText("DF FF"); f.e_ext.setText("A5"); f.c_range.setCurrentIndex(1); f.e_sl.setText("2")
-        self.assertIn("0x24", f.l_alfi.text()); e.b_upd.click()
-        st = self.w.project.steps[6]
-        self.assertEqual((st["rkind"], st["rid"], st["ext"], st["ext_on"], st["erase_range"], st["size_len"]), ("erase", "DF FF", "A5", True, "span", 2))
-        f.k_ext.setChecked(False); e.b_upd.click(); self.assertFalse(self.w.project.steps[6]["ext_on"])
-        self.assertEqual(e.table.item(6, 1).text(), "31 01 DF FF 24 [起始地址][大小]")
-        f.c_kind.setCurrentIndex(2)                              # 更新条件查询: plain 31 request
-        self.assertTrue(f.g_custom.isVisible() and f.e_desc.text() == "更新条件查询")
-        f.e_rid.setText("02 03"); f.e_data.setText("01"); e.b_upd.click()
-        st = self.w.project.steps[6]; self.assertEqual((st["rkind"], st["rid"], st["data"]), ("query", "02 03", "01"))
-        self.assertEqual(e.table.item(6, 1).text(), "31 01 02 03 01")
-        e.table.selectRow(0)
-        g = e._current_form(); self.assertEqual(g.kind, "service"); self.assertEqual(g.e_data.text(), "")
-        g.e_data.setText("")                                     # 10 + sub 03
-        self.assertEqual(g.c_sub.currentText(), "03 扩展会话")
-
-    def test_add_generic_service_with_sub_and_data(self):
-        e = self.w.editor
-        idx = [i for i, (s, f) in enumerate(e.forms) if s["sid"] == 0x28][0]
-        e.lst.setCurrentRow(idx)
-        f = e._current_form()
-        f.c_sub.setCurrentText("03 禁止收发"); f.e_data.setText("01"); f.c_addr.setCurrentIndex(1); f.c_sup.setCurrentIndex(1)
-        f.e_desc.setText("关闭通信"); e.b_add.click()
-        s = self.w.project.steps[-1]
-        self.assertEqual((s["pdu"], s["addr"], s["suppress"], s["name"]), ("28 03 01", "func", True, "关闭通信"))
-        e.table.item(len(self.w.project.steps) - 1, 1).setText("28 00 01")        # inline edit of the PDU
-        self.assertEqual(self.w.project.steps[-1]["pdu"], "28 00 01")
-        e.e_delay.setText("250"); e.b_delay.click()
-        self.assertEqual(self.w.project.steps[-1]["ms"], 250)
-        e.e_delay.setText("x"); W.QMessageBox.calls.clear(); e.b_delay.click(); self.assertTrue(msgs("warn"))
-
-    def test_invalid_form_values_warn(self):
-        e = self.w.editor
-        e.table.selectRow(4)
-        f = e._current_form(); f.e_level.setText("2"); W.QMessageBox.calls.clear(); e.b_upd.click()
-        self.assertIn("奇数", msgs("warn")[0][2])
-        e.table.selectRow(8); f = e._current_form(); f.e_rid.setText("DF"); W.QMessageBox.calls.clear(); e.b_upd.click()
-        self.assertIn("2 字节", msgs("warn")[0][2])
-        f.e_rid.setText("DF FE"); f.e_rid_file.setText("1234 56"); W.QMessageBox.calls.clear(); e.b_upd.click()
-        self.assertIn("全文件CRC标识符", msgs("warn")[0][2])
-        e.table.selectRow(6); f = e._current_form(); f.e_ext.setText("A5 B6"); W.QMessageBox.calls.clear(); e.b_upd.click()
-        self.assertIn("扩展字节", msgs("warn")[0][2])
-        f.c_kind.setCurrentIndex(3); f.e_data.setText("{bogus}"); W.QMessageBox.calls.clear(); e.b_upd.click()
-        self.assertIn("占位符", msgs("warn")[0][2])
-
-    def test_save_open_roundtrip_with_relative_paths(self):
-        self.prep("new")
-        path = os.path.join(self.tmp, "plan.json"); W.QFileDialog.next_path = path
-        self.w.editor.b_save.click()
-        d = json.load(open(path, encoding="utf-8")); fs = [s.get("file") for s in d["steps"] if s["type"] in ("driver", "download")]
-        self.assertEqual(sorted(fs), ["app.bin", "drv.bin"])                  # relativised
-        self.assertFalse(self.w.dirty)
-        self.w.editor.b_clr.click(); self.assertTrue(self.w.dirty); self.assertEqual(self.w.editor.table.rowCount(), 0)
-        self.w.editor.b_open.click()                                          # same path from the dialog stub
-        self.assertEqual(self.w.editor.table.rowCount(), 10)
-        self.w.apply_to_executor()
-        self.assertEqual(self.w.executor.base_dir, self.tmp)
-
-    def test_full_flash_new_product_via_gui(self):
-        self.prep("new")
-        self.run_exec()
-        ex = self.w.executor
-        self.assertEqual(self.card_colors(), [qt_color("#5FAE5B")] * 10)
-        self.assertEqual(ex.b_start.text(), "开始刷写"); self.assertEqual(ex.bar.value(), 100)
-        self.assertTrue(msgs("info")[-1][1] == "完成")
-        types = {ex.table.item(r, 1).text() for r in range(ex.table.rowCount())}
-        self.assertTrue({"请求", "响应"} <= types); self.assertFalse({"信息", "完成"} & types)       # step banners are not logged
-        ecu = self.ctx.dev.sim_ecu(0)
-        self.assertEqual(ecu.reset_count, 1); self.assertEqual(ecu.crc_checked, [(0x0102, True), (0x0103, True)]); self.assertEqual(len(ecu.seed), 16)
-        self.assertEqual(ecu.erased, [(0, 2500, b"\x01")])                  # erase: file start / total size / ext byte
-        data = open(self.fw, "rb").read()
-        self.assertEqual(bytes(ecu.mem[i] for i in range(len(data))), data)
-
-    def test_full_flash_old_product_via_gui(self):
-        self.prep("old")
-        self.run_exec()
-        ecu = self.ctx.dev.sim_ecu(0)
-        self.assertEqual(self.card_colors(), [qt_color("#5FAE5B")] * 10)
-        self.assertEqual((len(ecu.seed), ecu.crc_checked), (2, [(0xDFFE, True), (0xDFFD, True)]))
-        self.assertEqual(ecu.erase_requests[0][:5], bytes.fromhex("31 01 DF FF 44"))
-
-    def test_product_mismatch_marks_failing_card_and_stops(self):
-        def mut(p):
-            for s in p.steps:
-                if s.get("rkind") == "crc": s["rid"] = "DF FE"         # new ECU doesn't know it
-        self.prep("new", mut)
-        self.run_exec()
-        cols = self.card_colors()
-        self.assertEqual(cols[:7], [qt_color("#5FAE5B")] * 7); self.assertEqual(cols[7], qt_color("#D9534F"))   # caught after segment 1
-        self.assertEqual(cols[8:], [qt_color("#6C8EBF")] * 2)             # never ran
-        self.assertEqual(self.ctx.dev.sim_ecu(0).reset_count, 0)
-        self.assertTrue(msgs("warn"))
-
-    def test_preflight_blocks_start_and_lists_problems(self):
-        self.prep("new", lambda p: [s.__setitem__("file", "/no/such.bin") for s in p.steps if s["type"] == "download"])
-        self.run_exec()
-        self.assertEqual(len(msgs("warn")), 1); self.assertIn("步骤8", msgs("warn")[0][2])
-        self.assertEqual(self.ctx.dev.owners, {})                         # never touched the device
-
-    def test_repeat_count_and_gap(self):
-        self.prep("old")
-        self.w.executor.s_n.setValue(2)
-        self.run_exec()
-        self.assertEqual(self.ctx.dev.sim_ecu(0).reset_count, 2)
-
-    def test_executor_open_file_and_address_edit(self):
-        self.prep("new")
-        path = os.path.join(self.tmp, "p2.json"); self.w.project.save(path)
-        W.QFileDialog.next_path = path
-        self.w.executor.b_open.click()
-        self.assertEqual(self.w.executor.e_path.text(), path)
-        ex = self.w.executor
-        ex.e_phys.setText("7e5"); ex.e_phys.editingFinished.emit()
-        self.assertEqual(ex.project.cfg.addr.phys, 0x7E5)
-        self.assertEqual(self.w.project.cfg.addr.phys, 0x7E2)             # editor copy untouched
-
-    def test_new_project_and_dirty_guard(self):
-        self.w.editor.b_clr.click()
-        W.QMessageBox.next_answer = W.QMessageBox.No
-        self.w.editor.b_new.click()
-        self.assertEqual(self.w.project.name, "sample-new")                 # discard refused
-        W.QMessageBox.next_answer = W.QMessageBox.Yes
-        self.w.editor.b_new.click()
-        self.assertEqual(self.w.editor.table.rowCount(), 0); self.assertFalse(self.w.dirty)
+    def test_unlock_form_has_no_dll_and_uses_global_setting(self):
+        i = next(i for i, (sv, _) in enumerate(self.e.forms) if sv["sid"] == 0x27)
+        f = self.e.forms[i][1]
+        self.assertNotIn("e_dll", vars(f))
+        self.e.lst.setCurrentRow(i); f.e_level.setText("3"); self.e.b_add.click()
+        st = self.e.project.steps[-1]
+        self.assertEqual((st["type"], st["level"], st["dll"]), ("unlock", 3, ""))
 
 
-def qt_color(h):
-    return h
+class SecurityGlobalTests(Base):
+    def test_key_dll_is_a_global_persisted_setting(self):
+        cfg, ch = self.ctx.diag_cfg, self.ctx.channel
+        d = SettingsDialog(self.ctx, cfg, ch)
+        d.e_key.setText("C:/keys/SeedKey.dll"); d.btn_ok.click()
+        self.assertEqual(self.ctx.security.key_dll, "C:/keys/SeedKey.dll")
+        again = AppContext(self.ctx.dir)                                   # a new run reads it back
+        self.assertEqual(again.security.key_dll, "C:/keys/SeedKey.dll")
+        self.assertEqual(SettingsDialog(again, again.diag_cfg, again.channel).e_key.text(), "C:/keys/SeedKey.dll")
+
+    def test_settings_dialog_roundtrip_and_validation(self):
+        cfg, ch = self.ctx.diag_cfg, self.ctx.channel
+        d = SettingsDialog(self.ctx, cfg, ch)
+        self.assertEqual(d.e_phys.text(), "7e2"); self.assertEqual(d.a_p2.text(), "800")
+        d.a_p2.setText("1234"); d.a_pad_on.setChecked(False); d.k_on.setChecked(True); d.k_period.setText("500")
+        d.a_rxpad.setText("cc"); d.t_map.setRowCount(0); d._map_row("7e2","5","6"); d._map_row("7e8","2","4"); d._map_row("", "", "")
+        d.e_sdid.setText("f1 90"); d.e_sfile.setText("Sn.txt"); d.c_sfmt.setCurrentIndex(1); d.ch_fddl.setCurrentText("32")
+        d.btn_ok.click()
+        self.assertEqual((cfg.settings.p2_ms, cfg.settings.padding_enabled, cfg.keepalive.period_ms), (1234, False, 500))
+        self.assertEqual((cfg.settings.rx_padding, cfg.settings.padding), (0xCC, 0x55)); sec = self.ctx.security
+        self.assertEqual(sec.id_map, {"7e2": [5, 6], "7e8": [2, 4]}); self.assertEqual((sec.serial_did, sec.serial_file, sec.serial_format), ("F1 90", "Sn.txt", "hex"))
+        self.assertEqual((ch.fd_dl, ch.sim_profile), (32, "new"))
+        d2 = SettingsDialog(self.ctx, cfg, ch)
+        d2.a_p2.setText("abc"); d2.e_phys.setText("1fff")
+        W.QMessageBox.calls.clear(); d2.btn_ok.click()
+        self.assertTrue(msgs("warn")); self.assertEqual(cfg.settings.p2_ms, 1234)       # nothing half-applied
+
+    def test_service_editor_changes_services(self):
+        d = ServiceEditorDialog(self.ctx, None)
+        d.b_add.click()
+        d.e_sid.setText("BA"); d.e_name.setText("厂商服务"); d._sub_row("01", "子功能")
+        d.b_ok.click()
+        self.assertEqual(self.ctx.services[-1]["sid"], 0xBA); self.assertTrue(os.path.isfile(self.ctx.services_path))
 
 
 class CrcUiTests(Base):

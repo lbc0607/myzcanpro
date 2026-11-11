@@ -15,7 +15,6 @@ from typing import Any, Dict, List, Optional
 from .busstats import ChannelCfg
 from .devmgr import ConnError, channel_count, is_fd_device
 from .engine import Hooks, LogEvent
-from .flow import FlowError
 from .uds import NRC as NRC_TEXT
 from .project import (DEVICES, SIM_DEVICE, Addressing, DiagConfig, fmt_hex, new_step, parse_hex, parse_id)
 from .scanlib import (INFO_FIELDS, Executor, ScanError, ScanStore, cfg_for, default_skip, function_paths, render_result,
@@ -93,7 +92,6 @@ class Ops:
         self._senders: Dict[str, dict] = {}                    # key -> {"ev","thread","ch","res","item"}
         self._finished: Dict[str, dict] = {}                   # key -> summary of a sender that has ended
         self._keepalive: Dict[int, Any] = {}                   # channel -> DiagSession holding a 3E keep-alive
-        self._flow: Optional[dict] = None                      # the running / last flow run
         self._job: Optional[dict] = None                       # the running / last 功能 started with function_start
         self._lin: Optional[dict] = None                       # the open LIN master: {"master","kind","channel","baud"}
 
@@ -322,10 +320,11 @@ class Ops:
             raise OpsError("会话类型应为 1 字节: 01 默认 / 02 编程 / 03 扩展")
         return self.uds_request(channel, "10 " + fmt_hex(s), module=module, **kw)
 
-    def security_unlock(self, channel: int, dll: str, level: int = 1, module: str = "", **kw) -> Dict[str, Any]:
-        """27 seed / key unlock with a key DLL (path, or 'builtin:xor' for the demo algorithm)."""
-        if not dll:
-            raise OpsError("需要密钥 DLL 路径 (dll)，演示算法用 builtin:xor")
+    def security_unlock(self, channel: int, dll: str = "", level: int = 1, module: str = "", **kw) -> Dict[str, Any]:
+        """27 seed / key unlock. The key DLL is the global one (设置 → 安全访问 / settings_set security.key_dll);
+        `dll` (path, or 'builtin:xor' for the demo algorithm) overrides it for this call only."""
+        if not dll and not self.ctx.security.key_dll.strip():
+            raise OpsError("还没有配置密钥 DLL：先 settings_set(section='security', values={'key_dll': '路径'})，或本次传 dll；演示算法用 builtin:xor")
         lvl = _int(level, "安全级别", 1, 0x7D)
         if lvl % 2 == 0:
             raise OpsError("安全级别应为奇数 (27 请求种子的子功能)")
@@ -335,7 +334,7 @@ class Ops:
         try:
             from .engine import StepError
             try:
-                detail = sess.run_step(new_step("unlock", level=lvl, dll=dll))
+                detail = sess.run_step(new_step("unlock", level=lvl, dll=dll or ""))
                 return {"ok": True, "message": detail, "log": self._log_lines(log)}
             except StepError as e:
                 return {"ok": False, "error": str(e), "log": self._log_lines(log)}
@@ -430,7 +429,7 @@ class Ops:
             raise OpsError(f"模块「{module}」里没有功能「{path}」，可用: {', '.join(function_paths(self.store, module))}")
         ex = Executor.load(p)
         from .engine import preflight
-        problems = preflight(list(ex.steps), self.ctx.dir)
+        problems = preflight(list(ex.steps), self.ctx.dir, self.ctx.security.key_path(self.ctx.dir))
         if problems:
             return {"started": False, "message": "功能还不完整，未执行", "problems": problems}
         log: List[LogEvent] = []
@@ -741,74 +740,6 @@ class Ops:
             if not 0 <= getattr(c.addr, nm) <= limit:
                 raise OpsError(f"diag.addr.{nm} 超出{'扩展' if c.addr.extended else '标准'}帧 ID 范围")
 
-    # ------------------------------------------------------------------ flows (asynchronous so a call never blocks long)
-    def flow_start(self, flow: Any = None, name: str = "", simulate: bool = False) -> Dict[str, Any]:
-        """Start a flow in the background on the shared device; poll flow_status. Give `name` of a saved flow or `flow`."""
-        from . import flowapi
-        from .flowrun import CtxEnv, FlowRunner
-        with self.lock:
-            if self._flow and self._flow["thread"].is_alive():
-                raise OpsError("已有流程在执行，请先 flow_stop 或等它结束")
-        try:
-            if flow is None:
-                if not name:
-                    raise OpsError("需要 name(已保存的流程) 或 flow(流程对象)")
-                flow = flowapi.load(name)["flow"]
-            chk = flowapi.check(flow, self.ctx.dir)
-            if not chk["ok"]:
-                return {"started": False, "message": "流程校验未通过，未执行", **chk}
-            fl = flowapi.to_flow(flow)
-        except FlowError as e:
-            raise OpsError(str(e))
-        if simulate:
-            for n in fl.walk():
-                if n["type"] == "open_device":
-                    n["device"] = SIM_DEVICE
-        events: List[Any] = []
-        cancel = threading.Event()
-        st = {"flow": fl, "events": events, "cancel": cancel, "report": None, "simulate": simulate, "started": time.time()}
-
-        def go() -> None:
-            try:
-                st["report"] = FlowRunner(fl, CtxEnv(self.ctx), cancel, on_event=events.append).run()
-            except Exception as e:
-                from .flowrun import FlowReport
-                st["report"] = FlowReport(False, {}, f"执行出错: {e}")
-
-        t = threading.Thread(target=go, name="ops-flow", daemon=True)
-        st["thread"] = t
-        self._flow = st
-        t.start()
-        return {"started": True, "message": "流程已开始，用 flow_status 查看进度"}
-
-    def flow_status(self) -> Dict[str, Any]:
-        st = self._flow
-        if st is None:
-            return {"state": "none", "message": "还没有执行过流程"}
-        fl = st["flow"]
-        last: Dict[str, Any] = {}
-        for e in list(st["events"]):
-            if e.state == "reset":
-                last.pop(e.node, None)
-            else:
-                last[e.node] = e
-        steps = [{"id": n["id"], "name": n["name"], "type": n["type"], "state": last[n["id"]].state,
-                  "text": (last[n["id"]].text or "")[:400]} for n in fl.walk() if n["id"] in last]
-        running = st["thread"].is_alive()
-        rep = st["report"]
-        return {"state": "running" if running else "finished", "ok": None if running else bool(rep and rep.ok),
-                "message": "" if running else (rep.message if rep else ""), "simulated": st["simulate"],
-                "steps": steps, "failed": [s for s in steps if s["state"] == "fail"],
-                "elapsed_s": round(time.time() - st["started"], 1)}
-
-    def flow_stop(self) -> Dict[str, Any]:
-        st = self._flow
-        if st is None or not st["thread"].is_alive():
-            return {"message": "没有正在执行的流程"}
-        st["cancel"].set()
-        st["thread"].join(timeout=10)
-        return {"message": "已请求停止", **self.flow_status()}
-
     # ------------------------------------------------------------------ LIN (UDS over LIN)
     def _lin_master(self):
         if self._lin is None:
@@ -910,7 +841,6 @@ class Ops:
 
     # ------------------------------------------------------------------ lifecycle
     def shutdown(self) -> None:
-        self.flow_stop()
         self.function_stop()
         self._stop_all_ours()
 
@@ -921,5 +851,5 @@ METHODS = ["status", "device_list", "device_open", "device_close", "channel_star
            "keepalive_start", "keepalive_stop", "modules", "scan", "function_run", "function_start", "function_status", "function_stop",
            "frame_send", "cyclic_start", "cyclic_stop", "cyclic_list",
            "monitor_trace", "monitor_snapshot", "monitor_capture", "monitor_clear", "record_start", "record_stop",
-           "settings_get", "settings_set", "flow_start", "flow_status", "flow_stop",
+           "settings_get", "settings_set",
            "lin_open", "lin_close", "lin_status", "lin_request", "lin_scan_nodes", "lin_scan_pump"]

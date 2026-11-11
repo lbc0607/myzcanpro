@@ -5,9 +5,8 @@ from typing import Any, Dict, List, Optional
 
 from . import flashgen, tracefile
 from .engine import preflight
-from .flow import FlowError
-from .flowapi import home_dir, scan_dir
-from .project import STEP_TYPES, fmt_hex, normalize_step, parse_id
+from .paths import home_dir, scan_dir
+from .project import STEP_TYPES, fmt_hex, normalize_step, parse_id, read_global_key_dll
 from .scanlib import (FUNC_ADDR, INFO_FIELDS, Executor, Module, ScanError, ScanStore, check_name, default_info_executor,
                       function_paths)
 
@@ -15,6 +14,10 @@ MAX_TRACE_BYTES = 64 * 1024 * 1024
 TRACE_EXT = (".csv", ".txt", ".asc", ".log", ".trc", ".tsv")
 RESULT_KEYS = ("step", "skip", "parse")
 MAX_EXCHANGES_SHOWN = 300
+
+
+class FuncError(Exception):
+    pass
 
 
 def _store(home: Optional[str]) -> ScanStore:
@@ -27,22 +30,22 @@ def _module(store: ScanStore, name: str) -> Module:
     for m in store.modules():
         if m.name == name:
             return m
-    raise FlowError(f"找不到软件模块「{name}」，可用: {', '.join(x.name for x in store.modules())}")
+    raise FuncError(f"找不到软件模块「{name}」，可用: {', '.join(x.name for x in store.modules())}")
 
 
 def _func_path(store: ScanStore, m: Module, path: str) -> str:
     parts = [p for p in str(path).replace("\\", "/").split("/") if p != ""]
     if not parts:
-        raise FlowError("功能路径不能为空，如 '烧写' 或 '标定/零位标定'")
+        raise FuncError("功能路径不能为空，如 '烧写' 或 '标定/零位标定'")
     try:
         parts = [check_name(p) for p in parts]
     except ScanError as e:
-        raise FlowError(str(e))
+        raise FuncError(str(e))
     p = os.path.join(store.func_dir(m), *parts[:-1], parts[-1] + ".json")
     try:
         store._inside(p)
     except ScanError as e:
-        raise FlowError(str(e))
+        raise FuncError(str(e))
     return p
 
 
@@ -61,7 +64,7 @@ def check_steps(steps: Any, result: Optional[dict], home: Optional[str] = None) 
         except (ValueError, TypeError) as e:
             problems.append(f"步骤{i}: {e}")
     if len(norm) == len(steps):
-        problems += preflight(norm, home_dir(home))
+        problems += preflight(norm, home_dir(home), read_global_key_dll(home_dir(home)))
     res = {"step": -1, "skip": -1, "parse": "hex"}
     if result is not None:
         if not isinstance(result, dict) or set(result) - set(RESULT_KEYS):
@@ -84,9 +87,9 @@ def create_module(name: str, phys: str, resp: str = "", func: str = "", home: Op
         r = parse_id(resp) if resp else -1
         f = parse_id(func) if func else FUNC_ADDR
     except (ScanError, ValueError) as e:
-        raise FlowError(f"模块参数无效: {e}")
+        raise FuncError(f"模块参数无效: {e}")
     if any(m.name == nm or m.folder == nm for m in store.modules()):
-        raise FlowError(f"模块「{nm}」已存在")
+        raise FuncError(f"模块「{nm}」已存在")
     m = Module(nm, p, r, f, order=len(store.modules()), folder=nm)
     store.save_module(m)
     for key, _ in INFO_FIELDS:                          # the standard scan executors, so 软件扫描 works right away
@@ -100,11 +103,11 @@ def read_function(module: str, path: str, home: Optional[str] = None) -> Dict[st
     m = _module(store, module)
     p = _func_path(store, m, path)
     if not os.path.isfile(p):
-        raise FlowError(f"模块「{module}」里没有功能「{path}」，可用: {', '.join(function_paths(store, module)) or '(无)'}")
+        raise FuncError(f"模块「{module}」里没有功能「{path}」，可用: {', '.join(function_paths(store, module)) or '(无)'}")
     try:
         ex = Executor.load(p)
     except ScanError as e:
-        raise FlowError(str(e))
+        raise FuncError(str(e))
     return {"module": module, "path": path, "name": ex.name, "steps": ex.steps, "result": ex.result,
             "problems": check_steps(ex.steps, ex.result, home)["problems"]}
 
@@ -134,7 +137,7 @@ def delete_function(module: str, path: str, home: Optional[str] = None) -> Dict[
     m = _module(store, module)
     p = _func_path(store, m, path)
     if not os.path.isfile(p):
-        raise FlowError(f"没有功能「{path}」")
+        raise FuncError(f"没有功能「{path}」")
     os.remove(p)
     return {"deleted": True, "path": path}
 
@@ -169,23 +172,23 @@ def analyze_trace(text: str = "", path: str = "", tester_id: str = "", ecu_id: s
     """Read a recorded trace (ZCANPro / CanVDS CSV export, Vector ASC, "ID data" lines), pair the UDS exchanges and draft the
     steps of a 功能 from them (see zdiag.flashgen)."""
     if bool(text) == bool(path):
-        raise FlowError("text（报文文本）和 path（本机报文文件路径）二选一")
+        raise FuncError("text（报文文本）和 path（本机报文文件路径）二选一")
     if path:
         if not path.lower().endswith(TRACE_EXT):
-            raise FlowError(f"报文文件扩展名应为 {' / '.join(TRACE_EXT)}")
+            raise FuncError(f"报文文件扩展名应为 {' / '.join(TRACE_EXT)}")
         try:
             if os.path.getsize(path) > MAX_TRACE_BYTES:
-                raise FlowError("报文文件太大（超过 64MB）")
+                raise FuncError("报文文件太大（超过 64MB）")
             with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
                 text = f.read()
         except OSError as e:
-            raise FlowError(f"读取报文文件失败: {e}")
+            raise FuncError(f"读取报文文件失败: {e}")
     try:
         frames, finfo = tracefile.parse_frames(text, time_unit)
         ti = parse_id(tester_id) if tester_id else None
         ei = parse_id(ecu_id) if ecu_id else None
     except ValueError as e:
-        raise FlowError(str(e))
+        raise FuncError(str(e))
     exchanges, pinfo = tracefile.pair(tracefile.reassemble(frames), ti, ei)
     res: Dict[str, Any] = {"format": finfo["format"], "time_unit": finfo["time_unit"], "frames": finfo.get("frames", 0),
                            "skipped_lines": finfo["skipped"], "pairs": pinfo["pairs"], "exchange_count": len(exchanges),
@@ -209,7 +212,7 @@ CanVDS「功能」(执行器) = 某个软件模块下的一串步骤，和「ECU
 步骤 = {"type": ..., "name": 显示名, ...字段}，未写的字段用默认值。类型:
 - service: pdu(十六进制 "10 03"), addr("phys"|"func"), suppress(true=不期望响应), check(true=校验响应), expect(期望响应模式，空=肯定响应)
 - delay: ms
-- unlock: level(奇数，如 1), dll(密钥DLL路径；"builtin:xor"=演示算法)
+- unlock: level(奇数，如 1)；密钥 DLL 是全局设置（settings_set security.key_dll，配置一次永久有效），一般不写 dll；dll 字段只用于单步覆盖（"builtin:xor"=演示算法）
 - driver: file(Flash driver 文件 hex/s19/bin 路径), base_addr(十六进制，bin才用), addr_len(4), size_len(4), dfi("00")
 - download: 同 driver，下载应用程序；多段 hex/s19 的各段地址以文件为准
 - routine(31例程):

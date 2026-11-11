@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 from test_flashgen import Session, record_sim_flash
 from zdiag import funcapi
-from zdiag.flow import FlowError
+from zdiag.funcapi import FuncError
 from zdiag.ops import Ops, OpsError
 from zdiag.project import SIM_DEVICE
 from zdiag.scanlib import ScanStore
@@ -28,7 +28,7 @@ class Modules(Base):
         self.assertTrue(os.path.isfile(st.info_path([m for m in st.modules() if m.name == "新ECU"][0], "code")))
         self.assertEqual(funcapi.create_module("B", "100", "108", "7DF", self.home)["module"]["resp"], "108")
         for bad in (dict(name="新ECU", phys="7E5"), dict(name="a/b", phys="7E5"), dict(name="", phys="1"), dict(name="C", phys="zz"), dict(name="D", phys="1", resp="qq")):
-            with self.assertRaises(FlowError, msg=str(bad)): funcapi.create_module(home=self.home, **bad)
+            with self.assertRaises(FuncError, msg=str(bad)): funcapi.create_module(home=self.home, **bad)
 
 
 class Functions(Base):
@@ -45,13 +45,13 @@ class Functions(Base):
         st = ScanStore(os.path.join(self.home, "scan_data")); self.assertIn("标定/零位标定", function_paths(st, "动力域控制器"))
         self.assertFalse(self.save()["saved"]); self.assertTrue(self.save(overwrite=True)["saved"])                       # no silent overwrite
         self.assertTrue(funcapi.delete_function("动力域控制器", "烧写", self.home)["deleted"])
-        with self.assertRaises(FlowError): funcapi.read_function("动力域控制器", "烧写", self.home)
-        with self.assertRaises(FlowError): funcapi.delete_function("动力域控制器", "烧写", self.home)
+        with self.assertRaises(FuncError): funcapi.read_function("动力域控制器", "烧写", self.home)
+        with self.assertRaises(FuncError): funcapi.delete_function("动力域控制器", "烧写", self.home)
 
     def test_path_safety_and_unknown_module(self):
         for evil in ("../x", "a/../../b", "", "/", "..", "a:b", "x*y"):
-            with self.assertRaises(FlowError, msg=evil): self.save(evil)
-        with self.assertRaises(FlowError): funcapi.save_function("没有", "x", SVC, home=self.home)
+            with self.assertRaises(FuncError, msg=evil): self.save(evil)
+        with self.assertRaises(FuncError): funcapi.save_function("没有", "x", SVC, home=self.home)
         for root, _, files in os.walk(self.home): self.assertFalse([f for f in files if f in ("x.json", "b.json")])
 
     def test_validation(self):
@@ -84,7 +84,7 @@ class Trace(Base):
         self.assertEqual(funcapi.analyze_trace(text=txt, tester_id="999")["draft"], None)
         for kw in (dict(), dict(text="a", path="b"), dict(path=os.path.join(self.home, "x.exe")), dict(path=os.path.join(self.home, "missing.csv")),
                    dict(text=txt, time_unit="h"), dict(text=txt, tester_id="zz")):
-            with self.assertRaises(FlowError, msg=str(kw)): funcapi.analyze_trace(**kw)
+            with self.assertRaises(FuncError, msg=str(kw)): funcapi.analyze_trace(**kw)
         self.assertTrue(funcapi.analyze_trace(text="nothing here")["warnings"])
 
 

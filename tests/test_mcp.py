@@ -11,7 +11,7 @@ from zdiag.project import SIM_DEVICE
 from zdiag.rpc import RpcServer
 from zdiag_ui.appctx import AppContext
 
-EXPECTED = {"lin_open", "lin_close", "lin_request", "lin_scan_nodes", "lin_scan_pump", "get_flow_format", "get_catalog", "validate_flow", "save_flow", "load_flow", "list_flows", "run_flow", "flow_status", "stop_flow",
+EXPECTED = {"lin_open", "lin_close", "lin_request", "lin_scan_nodes", "lin_scan_pump",
             "get_status", "device_list", "device_open", "device_close", "channel_start", "channel_stop", "uds_request", "read_did", "write_did",
             "read_dtc", "clear_dtc", "ecu_reset", "session_control", "security_unlock", "keepalive_start", "keepalive_stop", "list_modules",
             "scan_module", "run_function", "send_frame", "cyclic_start", "cyclic_stop", "monitor_trace", "monitor_snapshot", "monitor_capture",
@@ -34,9 +34,9 @@ def tool(_tool, **args):
 class Bridge(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp()
-        self.old = {k: os.environ.get(k) for k in ("CANVDS_HOME", "CANVDS_FLOW_DIR", "CANVDS_URL", "CANVDS_TOKEN", "CANVDS_AUTOSTART")}
+        self.old = {k: os.environ.get(k) for k in ("CANVDS_HOME", "CANVDS_URL", "CANVDS_TOKEN", "CANVDS_AUTOSTART")}
         for k in ("CANVDS_URL", "CANVDS_TOKEN"): os.environ.pop(k, None)
-        os.environ["CANVDS_HOME"] = self.home; os.environ["CANVDS_FLOW_DIR"] = os.path.join(self.home, "flows")
+        os.environ["CANVDS_HOME"] = self.home
         self.addCleanup(self.restore)
 
     def restore(self):
@@ -73,19 +73,6 @@ class Bridge(unittest.TestCase):
         self.assertEqual(ctx.diag_cfg.settings.p2_ms, 750); self.assertEqual(tool("get_settings", section="diag")["diag"]["settings"]["p2_ms"], 750)
         self.assertIn("error", tool("set_settings", section="diag", values={"settings": {"p2_ms": 0}}))
         self.assertIn("modules", tool("list_modules"))
-
-    def test_run_flow_waits_and_reports(self):
-        self.serve(); tool("device_open", name=SIM_DEVICE); tool("channel_start", channel=0)
-        doc = {"nodes": [{"id": "l", "type": "lane", "channel": 0, "children": [
-            {"id": "sc", "type": "scan", "module": "动力域控制器", "fields": ["code"]}, {"id": "w", "type": "delay", "seconds": 0.1}]}]}
-        st = tool("run_flow", flow=doc, wait_s=20); self.assertEqual((st["state"], st["ok"]), ("finished", True), st)
-        saved = tool("save_flow", name="demo", flow=doc); self.assertTrue(saved["saved"])
-        st = tool("run_flow", name="demo", wait_s=20); self.assertTrue(st["ok"], st)
-        bad = tool("run_flow", flow={"nodes": [{"id": "l", "type": "lane", "channel": 0, "children": [{"id": "s", "type": "scan", "module": "x", "fields": ["code"]}]}]})
-        self.assertFalse(bad.get("started", True)); self.assertTrue(bad.get("errors"))
-        slow = {"nodes": [{"id": "l", "type": "lane", "channel": 0, "children": [{"id": "w", "type": "delay", "seconds": 30}]}]}
-        self.assertEqual(tool("run_flow", flow=slow, wait_s=0.5)["state"], "running")
-        self.assertEqual(tool("stop_flow")["state"], "finished")
 
     def test_trace_to_function_tools(self):
         sys.path.insert(0, os.path.dirname(__file__))

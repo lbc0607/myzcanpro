@@ -147,24 +147,29 @@ class SettingsDialog(W.QDialog):
         w = W.QWidget()
         v = W.QVBoxLayout(w)
         g = W.QGridLayout()
+        self.e_key, self.b_key = W.QLineEdit(), W.QPushButton("浏览")
         self.e_sdid, self.e_sfile, self.c_sfmt = W.QLineEdit(), W.QLineEdit(), W.QComboBox()
         self.e_sdir, self.b_sdir, self.b_spy = W.QLineEdit(), W.QPushButton("浏览"), W.QPushButton("python.exe所在文件夹")
         self.l_sfull = W.QLabel("")
         self.c_sfmt.addItems(["ASCII", "十六进制"])
-        g.addWidget(W.QLabel("序列号 DID(0x):"), 0, 0)
-        g.addWidget(self.e_sdid, 0, 1)
-        g.addWidget(W.QLabel("文件名:"), 1, 0)
-        g.addWidget(self.e_sfile, 1, 1)
-        g.addWidget(W.QLabel("文件所在文件夹:"), 2, 0)
-        g.addWidget(self.e_sdir, 2, 1)
-        g.addWidget(self.b_sdir, 2, 2)
-        g.addWidget(self.b_spy, 2, 3)
-        g.addWidget(W.QLabel("序列号写入格式:"), 3, 0)
-        g.addWidget(self.c_sfmt, 3, 1)
-        g.addWidget(self.l_sfull, 4, 0, 1, 4)
+        g.addWidget(W.QLabel("密钥 DLL(全局):"), 0, 0)
+        g.addWidget(self.e_key, 0, 1)
+        g.addWidget(self.b_key, 0, 2)
+        g.addWidget(W.QLabel("序列号 DID(0x):"), 1, 0)
+        g.addWidget(self.e_sdid, 1, 1)
+        g.addWidget(W.QLabel("文件名:"), 2, 0)
+        g.addWidget(self.e_sfile, 2, 1)
+        g.addWidget(W.QLabel("文件所在文件夹:"), 3, 0)
+        g.addWidget(self.e_sdir, 3, 1)
+        g.addWidget(self.b_sdir, 3, 2)
+        g.addWidget(self.b_spy, 3, 3)
+        g.addWidget(W.QLabel("序列号写入格式:"), 4, 0)
+        g.addWidget(self.c_sfmt, 4, 1)
+        g.addWidget(self.l_sfull, 5, 0, 1, 4)
         self.e_sdir.textChanged.connect(self._show_sfull)
         self.e_sfile.textChanged.connect(self._show_sfull)
         self.b_sdir.clicked.connect(self._pick_sdir)
+        self.b_key.clicked.connect(self._pick_key)
         self.b_spy.clicked.connect(lambda: self.e_sdir.setText(os.path.dirname(os.path.abspath(sys.executable))))
         v.addLayout(g)
         v.addWidget(W.QLabel("每次运行程序后，第一次安全访问前用 22 <DID> 读取序列号写入文件第1行（负响应则第1行为空），之后不再读取；\n"
@@ -187,6 +192,12 @@ class SettingsDialog(W.QDialog):
         d = self.ctx.security.__class__(serial_dir=self.e_sdir.text()).folder(self.ctx.dir)
         self.l_sfull.setText(f"实际写入: {os.path.join(d, self.e_sfile.text().strip() or '?')}"
                              "（文件夹留空 = 程序目录；也是密钥 DLL 的工作目录）")
+
+    def _pick_key(self) -> None:
+        f, _ = W.QFileDialog.getOpenFileName(self, "选择密钥 DLL", self.e_key.text().strip() or self.ctx.last_dir,
+                                             "DLL (*.dll);;所有文件 (*.*)")
+        if f:
+            self.e_key.setText(f)
 
     def _pick_sdir(self) -> None:
         d = W.QFileDialog.getExistingDirectory(self, "选择 EcuSerialNum.txt 所在文件夹", self.ctx.last_dir)
@@ -265,6 +276,7 @@ class SettingsDialog(W.QDialog):
         self.o_days.setText(str(lg.keep_days))
         self.o_raw.setChecked(s.show_raw)
         sec = self.ctx.security
+        self.e_key.setText(sec.key_dll)
         self.e_sdid.setText(sec.serial_did)
         self.e_sfile.setText(sec.serial_file)
         self.e_sdir.setText(sec.serial_dir)
@@ -341,6 +353,7 @@ class SettingsDialog(W.QDialog):
         self.ctx.logcfg.__dict__.update(lg_new.__dict__)
         sec = self.ctx.security                                    # program-wide: every window sees it at once
         sec.serial_did, sec.serial_file, sec.serial_dir = sdid_text, sfile, sdir
+        sec.key_dll = self.e_key.text().strip()
         sec.serial_format = "hex" if self.c_sfmt.currentIndex() == 1 else "ascii"
         sec.id_map = id_map
         self.ctx.save()

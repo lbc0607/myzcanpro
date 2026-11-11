@@ -72,7 +72,7 @@ def draft(exchanges: List[Exchange], delay_threshold_s: float = 0.5, func_id: in
                 i += 1
             bad(ex, "请求种子")
             steps.append(new_step("unlock", name=f"ECU解锁 级别{level:02X}", level=level))
-            todo.append(f"解锁步骤(级别 {level:02X})：需要选择密钥 DLL（dll 字段）")
+            todo.append(f"解锁步骤(级别 {level:02X})：需要在「更多设置 → 安全访问」里配置全局密钥 DLL（只需配置一次）")
             continue
         if sid == 0x34 and len(req) >= 3:                        # download cycle 34 .. 36 .. 37
             al, sl = _parse_alfi(req[2])

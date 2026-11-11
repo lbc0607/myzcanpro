@@ -144,10 +144,9 @@ class UnlockForm(StepForm):
         super().__init__(ctx, svc, parent)
         self.e_desc.setText("ECU解锁")
         g = W.QGridLayout()
-        self.e_level, self.e_dll = W.QLineEdit("1"), W.QLineEdit()
-        self.b_dll = W.QPushButton("浏览")
+        self.e_level = W.QLineEdit("1")
         _row(g, 0, "级别(奇数):", self.e_level)
-        _row(g, 1, "DLL:", self.e_dll, self.b_dll)
+        g.addWidget(W.QLabel("密钥 DLL 在「更多设置 → 安全访问」里全局配置一次即可，所有功能共用，重启后仍然有效。"), 1, 0, 1, 3)
         g.addWidget(W.QLabel("级别 1 即 27 01 请求种子 / 27 02 发送密钥；3 即 27 03/04，依此类推。"), 3, 0, 1, 3)
         g.addWidget(W.QLabel("种子/密钥长度由 ECU 和 DLL 决定，单帧/多帧传输由协议栈自动处理。"), 4, 0, 1, 3)
         g.addWidget(W.QLabel("每次用 DLL 解锁前会自动写 EcuSerialNum.txt（第1行序列号:本次运行首次解锁前用 22 F1 8C 读取；\n"
@@ -155,20 +154,16 @@ class UnlockForm(StepForm):
                              "文件名、所在文件夹（也是 DLL 的工作目录）同样在那里配置，所有窗口共用同一份设置。"), 5, 0, 1, 3)
         self.v.addLayout(g)
         self.v.addStretch(1)
-        self.b_dll.clicked.connect(lambda: self._browse(self.e_dll, "选择密钥 DLL", "DLL (*.dll);;所有文件 (*.*)"))
 
     def to_step(self) -> dict:
         level = int_of(self.e_level, "级别", 1, 0x7D)
         if level % 2 == 0:
             raise ValueError("安全级别必须是奇数 (27 请求种子的子功能)")
-        if not self.e_dll.text().strip():
-            raise ValueError("请选择密钥 DLL")
-        return new_step("unlock", name=self.desc(), level=level, dll=self.e_dll.text().strip())
+        return new_step("unlock", name=self.desc(), level=level)
 
     def load_step(self, s: dict) -> None:
         self.e_desc.setText(s.get("name", ""))
         self.e_level.setText(str(s.get("level", 1)))
-        self.e_dll.setText(s.get("dll", ""))
 
 
 # --------------------------------------------------------------------------- 34 文件下载 / Flash driver

@@ -140,23 +140,16 @@ class SettingsTests(Base):
         r = self.ops.uds_request(0, "10 01"); self.assertEqual(r["phys"], "7E3")
 
 
-class FlowTests(Base):
-    def test_flow_async_run_and_stop(self):
+class GlobalKey(Base):
+    def test_unlock_uses_global_key_dll(self):
         self.up()
-        doc = {"nodes": [{"id": "l", "type": "lane", "channel": 0, "children": [
-            {"id": "sc", "type": "scan", "module": "动力域控制器", "fields": ["code"]}, {"id": "w", "type": "delay", "seconds": 0.1}]}]}
-        self.assertTrue(self.ops.flow_start(doc)["started"])
-        for _ in range(100):
-            st = self.ops.flow_status()
-            if st["state"] == "finished": break
-            time.sleep(0.05)
-        self.assertTrue(st["ok"], st); self.assertEqual({s["id"]: s["state"] for s in st["steps"]}["sc"], "ok")
-        bad = self.ops.flow_start({"nodes": [{"id": "l", "type": "lane", "channel": 0, "children": [{"id": "s", "type": "scan", "module": "x", "fields": ["code"]}]}]})
-        self.assertFalse(bad["started"])
-        slow = {"nodes": [{"id": "l", "type": "lane", "channel": 0, "children": [{"id": "w", "type": "delay", "seconds": 30}]}]}
-        self.ops.flow_start(slow)
-        with self.assertRaises(OpsError): self.ops.flow_start(slow)
-        self.ops.flow_stop(); self.assertEqual(self.ops.flow_status()["state"], "finished")
+        with self.assertRaises(OpsError) as cm: self.ops.security_unlock(0)                    # nothing configured, no dll given
+        self.assertIn("key_dll", str(cm.exception))
+        self.ops.settings_set("security", {"key_dll": "builtin:xor"})
+        self.assertEqual(self.ctx.security.key_dll, "builtin:xor")
+        self.ops.session_control(0, "03")
+        r = self.ops.security_unlock(0); self.assertTrue(r["ok"], r)                          # global one, no dll argument
+        self.assertEqual(self.ops.settings_get("security")["security"]["key_dll"], "builtin:xor")
 
 
 class Api(unittest.TestCase):

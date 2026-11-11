@@ -5,7 +5,7 @@ from typing import Callable, Optional
 from zdiag.project import Project
 from zdiag.scanlib import PARSE_MODES, Executor
 from .common import info, warn
-from .flash_window import FlashEditorTab
+from .step_editor import StepEditorTab
 from .qt import QtWidgets as W
 
 
@@ -46,7 +46,7 @@ class RunPanel(W.QWidget):
 
 
 class _Host:
-    """What FlashEditorTab expects from its window."""
+    """What StepEditorTab expects from its window."""
 
     def __init__(self, page: "ExecEditorPage") -> None:
         self.page = page
@@ -86,7 +86,7 @@ class ExecEditorPage(W.QWidget):
         top.addWidget(W.QLabel("名称:"))
         top.addWidget(self.e_name)
         v.addLayout(top)
-        self.editor = FlashEditorTab(ctx, self.host)
+        self.editor = StepEditorTab(ctx, self.host)
         self.editor.embed("试运行")
         v.addWidget(self.editor, 1)
         box = W.QGroupBox("结果显示")

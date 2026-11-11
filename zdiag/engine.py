@@ -292,15 +292,15 @@ class DiagSession:
         return f"{s['ms']} ms"
 
     def _key_fn(self, s: dict):
-        dll = s.get("dll", "").strip()
-        if not dll:
-            raise StepError("未选择密钥 DLL")
-        if dll.startswith("builtin:"):
+        st = self.security                                         # read at call time: always the latest settings
+        dll = (s.get("dll") or "").strip()                         # a step-level DLL still wins (old plans); normally empty
+        path = (dll if dll.startswith("builtin:") else self.resolve(dll)) if dll else st.key_path(self.app_dir)
+        if not path:
+            raise StepError("未配置密钥 DLL：请在 更多设置 → 安全访问 里选择（全局设置，保存后一直有效）")
+        if path.startswith("builtin:"):
             return xor_demo_key
-        path = self.resolve(dll)
         if not os.path.isfile(path):
             raise StepError(f"密钥 DLL 不存在: {path}")
-        st = self.security                                         # read at call time: always the latest settings
         wd = st.folder(self.app_dir)                              # file + DLL working folder (default: program folder)
         try:
             did = int.from_bytes(parse_hex(st.serial_did), "big")
@@ -559,7 +559,7 @@ def _abs(base_dir: str, p: str) -> str:
     return p if os.path.isabs(p) else os.path.join(base_dir, p)
 
 
-def preflight(steps: List[dict], base_dir: str = ".") -> List[str]:
+def preflight(steps: List[dict], base_dir: str = ".", key_dll: str = "") -> List[str]:
     """Static checks before touching the ECU. Returns human-readable problems (empty = ok)."""
     out: List[str] = []
     seen_download = False
@@ -576,9 +576,9 @@ def preflight(steps: List[dict], base_dir: str = ".") -> List[str]:
             elif t == "unlock":
                 if int(s.get("level", 1)) % 2 == 0:
                     out.append(f"{tag}: 安全级别必须是奇数")
-                dll = s.get("dll", "").strip()
+                dll = (s.get("dll") or "").strip() or (key_dll or "").strip()          # step-level (old plans) or the global one
                 if not dll:
-                    out.append(f"{tag}: 未选择密钥 DLL")
+                    out.append(f"{tag}: 未配置密钥 DLL（更多设置 → 安全访问）")
                 elif not dll.startswith("builtin:") and not os.path.isfile(_abs(base_dir, dll)):
                     out.append(f"{tag}: 密钥 DLL 不存在: {_abs(base_dir, dll)}")
             elif t in ("driver", "download"):

@@ -24,7 +24,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--port", type=int, default=0, help="0 = 自动选择")
     ap.add_argument("--token", default="", help="不填则随机生成")
     a = ap.parse_args(argv)
-    from .flowapi import home_dir
+    from .paths import home_dir
     from zdiag_ui.appctx import AppContext
     home = home_dir(a.home)
     ctx = AppContext(home)

@@ -346,10 +346,6 @@ class EraseAndCrc(unittest.TestCase):
         self.assertEqual(len(preflight([e])), 1)
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
-
 class Preflight(unittest.TestCase):
     def test_reports_all_problems(self):
         from zdiag.engine import preflight
@@ -362,3 +358,49 @@ class Preflight(unittest.TestCase):
                 new_step("download", file=ok_file), new_step("routine", rid="DF FE", use_crc=True)]
         self.assertEqual(preflight(good), [])
         self.assertEqual(len(preflight([new_step("routine", rid="DF FE", use_crc=True)])), 1)
+
+class GlobalKeyDll(unittest.TestCase):
+    """The key DLL is ONE global security setting; unlock steps carry no DLL path of their own."""
+    def sess(self, key):
+        from zdiag.project import SecurityCfg
+        cfg = DiagConfig(); cfg.settings.p2_ms = 1500
+        bus, ecu = make_sim(cfg.addr, "new")
+        sec = SecurityCfg(); sec.key_dll = key
+        s = DiagSession(bus, cfg, Hooks(), security=sec)
+        self.addCleanup(lambda: (s.close(), ecu.stop()))
+        return s
+
+    def test_unlock_uses_global_dll(self):
+        s = self.sess("builtin:xor"); s.run_step(new_step("service", pdu="10 03"))
+        self.assertEqual(s.run_step(new_step("unlock", level=1)), "已解锁")
+        self.assertEqual(new_step("unlock")["dll"], "")                       # steps do not carry a path any more
+
+    def test_missing_global_dll_has_clear_message_and_step_dll_still_overrides(self):
+        s = self.sess("")
+        with self.assertRaises(StepError) as cm: s.run_step(new_step("unlock", level=1))
+        self.assertIn("更多设置 → 安全访问", str(cm.exception))
+        s.run_step(new_step("service", pdu="10 03"))
+        self.assertEqual(s.run_step(new_step("unlock", level=1, dll="builtin:xor")), "已解锁")     # old plans keep working
+        s2 = self.sess("/no/such/key.dll")
+        with self.assertRaises(StepError) as cm: s2.run_step(new_step("unlock", level=1))
+        self.assertIn("不存在", str(cm.exception))
+
+    def test_preflight_and_summary(self):
+        from zdiag.engine import preflight
+        u = new_step("unlock", level=1)
+        self.assertEqual(len(preflight([u])), 1); self.assertIn("安全访问", preflight([u])[0])
+        self.assertEqual(preflight([u], key_dll="builtin:xor"), [])
+        self.assertIn("全局设置", step_summary(u))
+
+    def test_relative_path_is_under_the_program_folder(self):
+        from zdiag.project import SecurityCfg, read_global_key_dll
+        c = SecurityCfg(key_dll="keys/Seed.dll")
+        self.assertEqual(c.key_path("/app"), os.path.normpath("/app/keys/Seed.dll"))
+        self.assertEqual(SecurityCfg(key_dll="builtin:xor").key_path("/app"), "builtin:xor")
+        d = tempfile.mkdtemp()
+        import json; json.dump({"security": {"key_dll": "k.dll"}}, open(os.path.join(d, "CanVDS_config.json"), "w"))
+        self.assertEqual(read_global_key_dll(d), os.path.join(d, "k.dll")); self.assertEqual(read_global_key_dll(tempfile.mkdtemp()), "")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

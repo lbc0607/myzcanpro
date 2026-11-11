@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import test_engine as E                                   # ihex(), SEG_A/SEG_B (stub-free helpers)
 from zdiag.busstats import ChannelCfg
 from zdiag.project import SIM_DEVICE, sample_project
-from zdiag_ui import common, dialogs, flash_window
+from zdiag_ui import common, dialogs
 from zdiag_ui.appctx import AppContext
 from zdiag_ui.launcher import LauncherWindow
 from zdiag_ui.style import QSS
@@ -76,7 +76,7 @@ def main() -> int:
         p.b_toggle.click()
     check("both channels started", ctx.dev.started() == [0, 1])
     # --- every window / dialog can be built and shown
-    for key in ("uds", "flash", "send", "monitor", "scan", "flow", "crc"):
+    for key in ("send", "monitor", "scan", "crc"):
         L._open(key)
         check(f"window {key} shows", L.windows[key].isVisible())
     dlg = dialogs.SettingsDialog(ctx, ctx.diag_cfg, ctx.channel)
@@ -88,38 +88,12 @@ def main() -> int:
     cd.show()
     check("channel dialog builds (FD)", cd.c_dbaud.isEnabled())
     cd.close()
-    check("tools are tabs", L.tabs.count() == 8)
+    check("tools are tabs", L.tabs.count() == 5)
     L.float_tool("monitor"); L.dock_tool("monitor")        # undock / dock round trip with the real Qt
     check("monitor docked again", "monitor" not in L.floating and L.tabs.indexOf(L.windows["monitor"]) >= 0)
-    for key in ("uds", "flash", "send", "scan", "flow"):   # a channel serves one window at a time: close them again
+    for key in ("send", "scan"):                           # a channel serves one window at a time: close them again
         L.close_tool(key)
     check("no window keeps the channel", ctx.dev.owners == {})
-    # --- 流程编排: real threads + queued signals: scan, reset, delay, cyclic send on channel 1
-    fw = L._make_tool("flow")
-    fw.show()
-    fl = fw.flow
-    lane0 = fl.lanes()[0]
-    sc = fl.make("scan", module=fw.env.store.modules()[0].name)
-    rs = fl.make("uds", module=sc["module"], pdu="11 01", name="复位")
-    lane0["children"] += [sc, rs, fl.make("delay", seconds=0.2)]
-    lane1 = fl.make("lane", channel=1)
-    snd = fl.make("send", can_id="321", data="01 02 03 04", period_ms=20)
-    lane1["children"] += [snd, fl.make("delay", seconds=0.5), fl.make("stop_send")]
-    fl.nodes.append(lane1)
-    fw._render()
-    check("flowchart drawn", len(fw.view.scene().items()) > 20 and fw.view.lay.width > 0)
-    fw._pick(sc["id"]); check("flowchart click selects row", fw._cur()["node"]["id"] == sc["id"] and fw.view.selected == sc["id"])
-    img = fw.view.grab(); check("flowchart paints", not img.isNull() and img.width() > 0)
-    fw.b_view.click(); check("list view toggle", fw.stack.currentIndex() == 1)
-    fw.b_view.click()
-    fw.b_run.click()
-    check("flow finished", pump(lambda: fw.worker is None, 30))
-    check("flow all green", fw.l_status.text().startswith("✔") and all(v[0] == "ok" for v in fw.state.values()))
-    check("flow shows scan result", "软件编码=" in fw.state[sc["id"]][1])
-    check("flow cyclic send counted", "共发送" in fw.state[snd["id"]][1])
-    check("flowchart box turned green", fw.view.bodies[sc["id"]].brush().color().name().lower() == "#d5f5e3")
-    fw.close()
-    check("flow released the channels", ctx.dev.owners == {})
     # --- 报文监视 stays open (and records) while everything below runs
     mon = L.windows["monitor"]
     rec_path = os.path.join(tempfile.mkdtemp(), "live.csv")
@@ -139,13 +113,6 @@ def main() -> int:
     check("list send finished", not t.running())
     L.close_tool("send")
     check("send window released the channel", pump(lambda: ctx.dev.owners == {}, 5))   # release runs in the GUI thread
-    # --- UDS诊断
-    L._open("uds")
-    dw = L.windows["uds"]
-    dw.e_pdu.setText("22 F1 90"); dw.b_now.click()
-    check("uds 22 F190 answered", pump(lambda: any(e.kind == "RSP" and e.data[:3] == bytes([0x62, 0xF1, 0x90]) for e in dw.events)))
-    L.close_tool("uds")
-    pump(lambda: ctx.dev.owners == {}, 5)
     # --- 软件扫描: scan 4 software modules, open a module's functions, run one
     ctx.scan_dir = tempfile.mkdtemp()
     L._open("scan")
@@ -163,25 +130,29 @@ def main() -> int:
     sw.rows and sw.b_up.click()
     L.close_tool("scan")
     pump(lambda: ctx.dev.owners == {}, 5)
-    # --- ECU刷新 (two-segment HEX, erase + segment/whole-file CRC)
-    L._open("flash")
-    fw = L.windows["flash"]
+    # --- a flash 功能 (two-segment HEX, erase + segment/whole-file CRC) with the GLOBAL key DLL, next to the monitor
+    from zdiag.engine import Hooks
     d = tempfile.mkdtemp()
     hexp, drv = os.path.join(d, "app.hex"), os.path.join(d, "drv.bin")
-    open(hexp, "w").write(E.ihex([E.SEG_A, E.SEG_B]))
-    open(drv, "wb").write(os.urandom(300))
+    with open(hexp, "w") as f_:
+        f_.write(E.ihex([E.SEG_A, E.SEG_B]))
+    with open(drv, "wb") as f_:
+        f_.write(os.urandom(300))
     p = sample_project("new")
     p.cfg.settings.p2_ms = 800
+    ctx.security.key_dll = "builtin:xor"                    # one global setting; the unlock step carries no path
     for s in p.steps:
-        if s["type"] == "unlock": s["dll"] = "builtin:xor"
+        if s["type"] == "unlock": s["dll"] = ""
         if s["type"] == "driver": s["file"] = drv
         if s["type"] == "download": s["file"] = hexp
-    fw.project = p
-    fw.editor.refresh(); fw.apply_to_executor()
-    ctx.diag_cfg.settings.p2_ms = 800
-    fw.executor.b_start.click()
-    pump(lambda: fw.executor.running(), 3)
-    check("flash plan completes", pump(lambda: not fw.executor.running(), 90))
+    tok = object()
+    sess = ctx.open_session(p.cfg, ctx.channel, tok, Hooks())
+    try:
+        flash_ok = sess.run_plan(p.steps)
+    finally:
+        sess.close()
+        ctx.dev.release(tok)
+    check("flash plan completes", flash_ok)
     ecu = ctx.dev.sim_ecu(0)
     check("ECU saw erase + 3 CRC checks + reset",
           ecu.erased == [(0x08000000, 40, b"\x01")] and [c[1] for c in ecu.crc_checked] == [True] * 3 and ecu.reset_count == 1)
