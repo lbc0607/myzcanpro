@@ -1,5 +1,5 @@
 """Operations layer against the simulated device (real AppContext)."""
-import os, sys, tempfile, time, unittest
+import os, sys, tempfile, threading, time, unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from zdiag.ops import METHODS, Ops, OpsError
 from zdiag.project import SIM_DEVICE
@@ -204,6 +204,62 @@ class FileTransferOps(Base):
         with self.assertRaises(OpsError): self.ops.ft_send([2], [self.ctx.dir])                 # channel 2 is busy
         self.assertEqual(self.ops.ft_status()["active"], ["receive"])
         self.assertIn("已停止 1", self.ops.ft_stop()["message"]); self.assertEqual(self.ops.ft_status()["active"], [])
+
+
+class ForcedStop(Base):
+    """Stopping a channel / closing the device has priority over everything that uses it."""
+
+    def _running_receive(self):
+        self.up(0, 1)
+        d = os.path.join(self.ctx.dir, "force_dst")
+        self.assertTrue(self.ops.ft_receive([0], d, once=False)["started"])
+        time.sleep(0.2)
+        self.assertEqual(self.ops.ft_status()["active"], ["receive"])
+
+    def _wait_idle(self):
+        end = time.time() + 5
+        while time.time() < end and self.ops.ft_status()["active"]:
+            time.sleep(0.05)
+        self.assertEqual(self.ops.ft_status()["active"], [])
+
+    def test_channel_stop_aborts_the_transfer(self):
+        self._running_receive()
+        t0 = time.time()
+        self.ctx.dev.stop_channel(0)                          # what the 通道关闭 button does: no veto
+        self.assertLess(time.time() - t0, 2.0); self._wait_idle()
+        self.assertEqual(self.ctx.dev.started(), [1]); self.assertEqual(self.ctx.dev.owners, {})
+
+    def test_device_close_aborts_everything(self):
+        self._running_receive()
+        self.ops.keepalive_start(1)
+        self.ctx.dev.close()
+        self._wait_idle(); self.assertFalse(self.ctx.dev.is_open); self.assertEqual(self.ops._keepalive, {})
+
+    def test_ft_stop_without_waiting_returns_at_once(self):
+        self._running_receive()
+        t0 = time.time(); self.ops.ft_stop(wait=0); self.assertLess(time.time() - t0, 0.5)
+        self._wait_idle()
+
+    def test_function_and_uds_wait_can_be_cancelled(self):
+        from zdiag.uds import UdsClient
+
+        class SilentTp:
+            tx_id = 0
+            def flush(self): pass
+            def send(self, d): pass
+            def recv(self, timeout):
+                time.sleep(min(timeout, 0.01)); return None
+        c = UdsClient(SilentTp(), p2=30.0)
+        stop = {"v": False}
+        class Boom(Exception): pass
+
+        def check():
+            if stop["v"]: raise Boom()
+        c.cancel_check = check
+        threading.Timer(0.2, lambda: stop.__setitem__("v", True)).start()
+        t0 = time.time()
+        with self.assertRaises(Boom): c.request(b"\x10\x03")
+        self.assertLess(time.time() - t0, 2.0)                 # not the 30 s of P2
 
 
 class Api(unittest.TestCase):

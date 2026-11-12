@@ -10,7 +10,7 @@ from zdiag.engine import Hooks
 from zdiag.project import parse_id
 from zdiag.scanlib import (INFO_FIELDS, FIELD_LABEL, Entry, Executor, Module, ScanError, ScanStore, cfg_for,
                            run_executor, scan_module)
-from .common import Bridge, Worker, fill_channel_combo, info, warn
+from .common import Bridge, Worker, fill_channel_combo, info, orphan, warn
 from .exec_editor import ExecEditorPage, RunPanel
 from .qt import Qt, QtCore, QtWidgets as W, Signal
 
@@ -322,6 +322,10 @@ class ScanWindow(W.QMainWindow):
     def _stop(self) -> None:
         self.cancel.set()
 
+    def abort(self) -> None:
+        """Called by the device manager (channel stopped / device closed): cancel the running scan / function. Flags only."""
+        self.cancel.set()
+
     # ------------------------------------------------------------------ worker plumbing
     def _run_worker(self, fn, on_result) -> None:
         self.worker = Worker(fn)
@@ -579,9 +583,10 @@ class ScanWindow(W.QMainWindow):
     # ------------------------------------------------------------------ lifecycle
     def closeEvent(self, event) -> None:
         if self.worker is not None and self.worker.isRunning():
-            info(self, "正在运行，请先停止后再关闭窗口。")
-            event.ignore()
-            return
+            self.cancel.set()                                  # closing always wins: cancel, let the worker wind down in the background
+            self.worker.wait(300)
+            if self.worker.isRunning():
+                orphan(self.worker)
         self.ctx.dev.remove_listener(self._on_dev_change)
         self.ctx.dev.release(self)
         self.ctx.save()

@@ -36,6 +36,16 @@ class Worker(QtCore.QThread):
             self.error.emit(f"{type(e).__name__}: {e}")
 
 
+_ORPHANS: list = []
+
+
+def orphan(worker: "QtCore.QThread") -> None:
+    """Let a still running worker thread finish on its own after its window has gone (a QThread destroyed while running crashes)."""
+    worker.setParent(None)
+    _ORPHANS.append(worker)
+    worker.finished.connect(lambda: _ORPHANS.remove(worker) if worker in _ORPHANS else None)
+
+
 def info(parent, text: str, title: str = "提示") -> None:
     W.QMessageBox.information(parent, title, text)
 

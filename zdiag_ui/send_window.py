@@ -6,7 +6,7 @@ from zdiag.devmgr import ConnError
 from zdiag.project import fmt_hex, parse_hex, parse_id
 from zdiag.sendlist import (FD_LENGTHS, PARALLEL, SERIAL, SendItem, SendResult, frame_at, load_list, run_send,
                             save_list)
-from .common import Worker, fill_channel_combo, info, pick_file, save_file, warn
+from .common import Worker, fill_channel_combo, info, orphan, pick_file, save_file, warn
 from .qt import Qt, QtCore, QtWidgets as W, Signal
 
 HEADERS = ["序号", "状态", "ID(0x)", "协议", "长度", "名称", "数据", "帧类型", "每次发送帧数", "发送次数", "每次间隔(ms)"]
@@ -372,10 +372,16 @@ class SendTab(W.QWidget):
         self.b_list.setText("列表发送")
         self.ctx.dev.release(self)
 
+    def abort(self) -> None:
+        """Called by the device manager (channel stopped / device closed): stop sending at once. Flags only."""
+        self.cancel.set()
+
     def shutdown(self) -> None:
         self.cancel.set()
-        if self.worker is not None:
-            self.worker.wait(2000)
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.wait(300)                                # the send loop polls `cancel`; never freeze the window on it
+            if self.worker.isRunning():
+                orphan(self.worker)
         self.ctx.dev.release(self)
 
 

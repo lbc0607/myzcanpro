@@ -51,6 +51,7 @@ class UdsClient:
         self.suppress_wait = False     # True: after a suppress-positive request return at once
         self.auto_keepalive = True     # session() starts/stops the 3E keep-alive by itself
         self.hook = None               # optional callable(kind, payload): "TX" | "RX" | "NRC"
+        self.cancel_check = None       # optional callable(): raises to abandon a wait at once (polled every 50 ms)
         self._lock = threading.RLock()
         self._ka_stop: Optional[threading.Event] = None
         self._ka_thread: Optional[threading.Thread] = None
@@ -106,7 +107,14 @@ class UdsClient:
         deadline = time.perf_counter() + p2
         pending = 0
         while True:
-            rsp = self.tp.recv(max(deadline - time.perf_counter(), 0))
+            rsp = None
+            while True:                                  # wait in 50 ms slices so a cancel / channel close is noticed at once
+                if self.cancel_check is not None:
+                    self.cancel_check()
+                left = max(deadline - time.perf_counter(), 0)
+                rsp = self.tp.recv(min(left, 0.05))
+                if rsp is not None or left <= 0.05:
+                    break
             if rsp is None:
                 if suppress_positive:
                     return b""

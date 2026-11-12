@@ -106,11 +106,31 @@ class ManagerTests(unittest.TestCase):
         with self.assertRaises(ConnError):
             dm.acquire(0, b, Addressing())
         with self.assertRaises(ConnError):
-            dm.stop_channel(0)
+            dm.stop_channel(0, force=False)                                   # the old behaviour is still available
         with self.assertRaises(ConnError):
-            dm.close()
+            dm.close(force=False)
         dm.release(a); dm.stop_channel(0)
         dm.release(b); dm.close()
+
+    def test_stop_and_close_take_priority_over_users(self):
+        dm = self.dm
+        dm.open(SIM_DEVICE); dm.start_channel(0, ChannelCfg()); dm.start_channel(1, ChannelCfg())
+
+        class User:
+            aborted = 0
+            def abort(self): self.aborted += 1
+        a, b, plain = User(), User(), object()
+        dm.acquire(0, a, Addressing()); dm.acquire(1, b, Addressing())
+        dm.stop_channel(0)                                                    # no ConnError: the user of channel 0 is aborted
+        self.assertEqual((a.aborted, b.aborted), (1, 0)); self.assertEqual(dm.started(), [1]); self.assertNotIn(0, dm.owners)
+        dm.close()                                                            # ... and so is the user of channel 1
+        self.assertEqual(b.aborted, 1); self.assertFalse(dm.is_open); self.assertEqual(dm.owners, {})
+        dm.open(SIM_DEVICE); dm.start_channel(0, ChannelCfg()); dm.acquire(0, plain, Addressing())
+        dm.close(); self.assertFalse(dm.is_open)                              # an owner without abort() does not get in the way
+        dm.open(SIM_DEVICE); dm.start_channel(0, ChannelCfg())
+        class Bad:
+            def abort(self): raise RuntimeError("boom")
+        dm.acquire(0, Bad(), Addressing()); dm.stop_channel(0); self.assertEqual(dm.started(), [])
 
     def test_acquire_needs_started_normal_channel(self):
         dm = self.dm

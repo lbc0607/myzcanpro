@@ -1,4 +1,4 @@
-import json, os, sys, tempfile, unittest, zlib
+import json, os, sys, tempfile, time, unittest, zlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
 sys.path.insert(0, HERE)
@@ -243,7 +243,7 @@ class LauncherTests(Base):
         d2 = dialogs.ChannelConfigDialog(SIM_DEVICE, 0, d.result_cfg)
         self.assertEqual(d2.c_accel.currentIndex(), 1)
 
-    def test_channel_stop_blocked_while_window_uses_it(self):
+    def test_channel_stop_and_device_close_win_over_a_window(self):
         from zdiag_ui import dialogs
         w = self._fresh_launcher()
         w.c_device.setCurrentText(SIM_DEVICE); w.b_device.click()
@@ -251,12 +251,28 @@ class LauncherTests(Base):
         dialogs.ChannelConfigDialog.exec_ = lambda dlg: (dlg._on_ok(), 1)[1]
         self.addCleanup(setattr, dialogs.ChannelConfigDialog, "exec_", old)
         w.panels[1].b_toggle.click()
-        self.ctx.dev.acquire(1, "someone", self.ctx.diag_cfg.addr)
+        class Win:
+            n = 0
+            def abort(self): self.n += 1
+        a = Win(); self.ctx.dev.acquire(1, a, self.ctx.diag_cfg.addr)
         W.QMessageBox.calls.clear()
-        w.panels[1].b_toggle.click(); w.b_device.click()
-        self.assertEqual(len(msgs("warn")), 2); self.assertEqual(self.ctx.dev.started(), [1])
-        self.ctx.dev.release("someone")
-        w.b_device.click(); self.assertFalse(self.ctx.dev.is_open)
+        w.panels[1].b_toggle.click()                                          # stopping the channel works although a window holds it
+        self.assertEqual(a.n, 1); self.assertEqual(self.ctx.dev.started(), []); self.assertFalse(msgs("warn"))
+        w.panels[1].b_toggle.click(); b = Win(); self.ctx.dev.acquire(1, b, self.ctx.diag_cfg.addr)
+        w.b_device.click()                                                    # ... and so does closing the device
+        self.assertEqual(b.n, 1); self.assertFalse(self.ctx.dev.is_open); self.assertFalse(msgs("warn"))
+        w.close()
+
+    def test_settings_button_opens_the_global_settings(self):
+        from zdiag_ui import dialogs
+        w = self._fresh_launcher()
+        self.assertEqual(w.b_settings.text(), "设置")
+        seen = []
+        old = dialogs.SettingsDialog.exec_
+        dialogs.SettingsDialog.exec_ = lambda dlg: (seen.append(dlg), 1)[1]
+        self.addCleanup(setattr, dialogs.SettingsDialog, "exec_", old)
+        w.b_settings.click()
+        self.assertEqual(len(seen), 1); self.assertIn("e_key", vars(seen[0]))        # incl. the global 安全访问 key DLL
         w.close()
 
     def test_opens_all_tools(self):
@@ -604,7 +620,7 @@ class FileTransferTests(Base):
         self.assertEqual(self.win.selected_channels(), [0, 1])
         self.win._on_dev_change(); self.assertEqual(self.win.selected_channels(), [0, 1])   # the choice survives a refresh
 
-    def test_receive_start_stop_and_close_veto(self):
+    def test_receive_start_stop_and_close_always_works(self):
         import tempfile
         self.up(0)
         w = self.win
@@ -614,12 +630,35 @@ class FileTransferTests(Base):
         self.assertTrue(w.running()); self.assertTrue(w.b_stop.isEnabled() and not w.b_start.isEnabled())
         W.QMessageBox.calls.clear()
         ev = type("E", (), {"ok": None, "accept": lambda s: setattr(s, "ok", True), "ignore": lambda s: setattr(s, "ok", False)})()
-        w.closeEvent(ev); self.assertFalse(ev.ok); self.assertTrue(msgs())     # refuses while a transfer runs
-        w.b_stop.click()
+        t0 = time.monotonic()
+        w.b_stop.click()                                                    # never blocks the GUI thread
+        self.assertLess(time.monotonic() - t0, 1.0)
+        for _ in range(100):
+            if not w.running(): break
+            time.sleep(0.05)
+        w._tick()
         self.assertFalse(w.running()); self.assertTrue(w.b_start.isEnabled())
         self.assertEqual(self.ctx.dev.owners, {})                          # channel handed back
-        ev2 = type("E", (), {"ok": None, "accept": lambda s: setattr(s, "ok", True), "ignore": lambda s: setattr(s, "ok", False)})()
-        w.closeEvent(ev2); self.assertTrue(ev2.ok)
+        w.b_start.click(); self.assertTrue(w.running())
+        w.closeEvent(ev); self.assertTrue(ev.ok)                            # closing is never vetoed, it stops the transfer
+        for _ in range(100):
+            if not w.running(): break
+            time.sleep(0.05)
+        self.assertFalse(w.running()); self.assertEqual(self.ctx.dev.owners, {})
+
+    def test_device_close_aborts_a_running_transfer(self):
+        import tempfile
+        self.up(0)
+        w = self.win
+        w.c_role.setCurrentIndex(1); w.e_dest.setText(tempfile.mkdtemp()); w.k_loop.setChecked(True); w.b_start.click()
+        self.assertTrue(w.running())
+        t0 = time.monotonic()
+        self.ctx.dev.close()                                                # no veto, no long wait
+        self.assertLess(time.monotonic() - t0, 3.0); self.assertFalse(self.ctx.dev.is_open)
+        for _ in range(100):
+            if not w.running(): break
+            time.sleep(0.05)
+        self.assertFalse(w.running())
 
     def test_busy_channel_is_reported(self):
         self.up(0)

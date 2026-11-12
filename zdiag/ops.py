@@ -82,6 +82,16 @@ def _typed_merge(obj, values: Dict[str, Any], section: str, readonly: tuple = ()
         setattr(obj, k, v)
 
 
+class _Token:
+    """Channel owner token of an Ops instance; the device manager calls abort() when the channel is stopped / the device closed."""
+
+    def __init__(self, ops: "Ops", ch: int) -> None:
+        self.ops, self.ch = ops, ch
+
+    def abort(self) -> None:
+        self.ops.abort_channel(self.ch)
+
+
 class Ops:
     def __init__(self, ctx) -> None:
         self.ctx = ctx
@@ -103,7 +113,7 @@ class Ops:
         with self.lock:
             tok = self._owner.get(ch)
             if tok is None:
-                tok = self._owner[ch] = object()
+                tok = self._owner[ch] = _Token(self, ch)
             self._uses[ch] = self._uses.get(ch, 0) + 1
             return tok
 
@@ -115,6 +125,26 @@ class Ops:
                 tok = self._owner.pop(ch, None)
                 if tok is not None:
                     self.ctx.dev.release(tok)
+
+    def abort_channel(self, ch: int) -> None:
+        """Ask everything of ours that uses channel `ch` to stop (flags only, never blocks; the threads wind down by themselves)."""
+        for j in list(self._ft.values()):
+            if ch in getattr(j, "channels", ()):
+                j.engine.stop()
+        for s in list(self._senders.values()):
+            if s["ch"] == ch:
+                s["ev"].set()
+        j = self._job
+        if j is not None and j.get("ch") == ch and "sess" in j:
+            j["sess"].cancel.set()
+        sess = self._keepalive.pop(ch, None)
+        if sess is not None:
+            sess.cancel.set()
+            try:
+                sess.close()
+            except Exception:
+                pass
+            self._drop(ch)
 
     def _bus(self, ch: int):
         """(bus, token) of a started channel; the caller must _drop(ch) afterwards."""
@@ -197,7 +227,7 @@ class Ops:
         self.keepalive_stop(n)
 
     def _stop_all_ours(self) -> None:
-        self.ft_stop()
+        self.ft_stop(wait=2.0)
         self.lin_close()
         for k in list(self._senders):
             self._stop_sender(k)
@@ -442,7 +472,7 @@ class Ops:
         hooks.step = lambda i, st, d: job["steps"].__setitem__(i, (st, d))
         hooks.progress = lambda done, total: job.__setitem__("progress", (done, total)) if total else None   # (0, 0) = "no bar"
         sess, n = self._session(channel, cfg_for(self.ctx.diag_cfg, m), log, hooks, all_log=True)
-        job["sess"] = sess
+        job["sess"], job["ch"] = sess, n
 
         def go() -> None:
             try:
@@ -474,12 +504,12 @@ class Ops:
                 "progress": {"done": done, "total": total}, "steps": steps, "log": self._log_lines(j["log"]),
                 "elapsed_s": round(time.time() - j["started"], 1)}
 
-    def function_stop(self) -> Dict[str, Any]:
+    def function_stop(self, wait: float = 15.0) -> Dict[str, Any]:
         j = self._job
         if j is None or not j["thread"].is_alive():
             return {"message": "没有正在执行的功能"}
         j["sess"].cancel.set()
-        j["thread"].join(timeout=15)
+        j["thread"].join(timeout=wait)
         return {"message": "已请求停止", **self.function_status()}
 
     # ------------------------------------------------------------------ raw frames
@@ -833,12 +863,15 @@ class Ops:
         return {"jobs": out, "active": [r for r, j in self._ft.items() if j.running()]} if out else {"jobs": {}, "active": [],
                                                                                                           "message": "还没有文件传输"}
 
-    def ft_stop(self, role: str = "") -> Dict[str, Any]:
+    def ft_stop(self, role: str = "", wait: float = 10.0) -> Dict[str, Any]:
+        """Stop the transfer(s). The stop flag is set first and always takes effect at once; `wait` only bounds how long we wait
+        for the worker threads to wind down (0 = do not wait; the GUI uses that)."""
         jobs = [j for r, j in self._ft.items() if j.running() and role in ("", r)]
         for j in jobs:
             j.engine.stop()
         for j in jobs:
-            j.thread.join(timeout=10)
+            if wait > 0:
+                j.thread.join(timeout=wait)
         return {"message": f"已停止 {len(jobs)} 个文件传输" if jobs else "没有正在进行的文件传输", **self.ft_status()}
 
     # ------------------------------------------------------------------ LIN (UDS over LIN)
@@ -942,7 +975,7 @@ class Ops:
 
     # ------------------------------------------------------------------ lifecycle
     def shutdown(self) -> None:
-        self.function_stop()
+        self.function_stop(wait=3.0)
         self._stop_all_ours()
 
 

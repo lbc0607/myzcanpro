@@ -8,6 +8,7 @@ Closing the device stops all its channels; a channel that a window is using cann
 from __future__ import annotations
 import os
 import threading
+import time
 from typing import Callable, Dict, List, Optional
 
 from .busstats import BusStats, ChannelCfg, CountingBus
@@ -131,17 +132,42 @@ class DeviceManager:
         except Exception as e:
             raise ConnError(f"打开设备失败: {e}")
 
-    def close(self) -> None:
-        """Close the device (stops every channel). Raises ConnError while a window is using one."""
+    def abort_users(self, channels=None) -> List[object]:
+        """Tell whoever uses these channels (all when None) to stop NOW and take the channels away from them.
+        An owner may define abort(); it must only set flags (never block).  Returns the owners that were aborted."""
         with self._lock:
+            hit = [n for n in (list(self.owners) if channels is None else channels) if n in self.owners]
+            gone = []
+            for n in hit:
+                o = self.owners.pop(n, None)
+                if o is not None and o not in gone:
+                    gone.append(o)
+        for o in gone:
+            fn = getattr(o, "abort", None)
+            if callable(fn):
+                try:
+                    fn()
+                except Exception:
+                    pass
+        if gone:
+            time.sleep(0.05)                      # a moment for the aborted threads to notice before the channel is torn down
+        return gone
+
+    def close(self, force: bool = True) -> None:
+        """Close the device (stops every channel).  Whatever is using a channel is aborted first (force=True, the default; with
+        force=False a busy channel raises ConnError instead)."""
+        if not force:
             busy = [c for c in self.chans if c in self.owners]
             if busy:
                 raise ConnError("通道正在被诊断/刷新窗口使用，请先停止后再关闭设备")
+        self.abort_users()
+        with self._lock:
             self.shutdown()
         self._notify()
 
     def shutdown(self) -> None:
         """Unconditional teardown (application exit)."""
+        self.abort_users()
         with self._lock:
             for n in list(self.chans):
                 self._stop_locked(n)
@@ -196,10 +222,12 @@ class DeviceManager:
         ch.bus, ch.ecu = CountingBus(bus, ch.stats), ecu
         ch.sim_key = (profile, addr.phys, addr.resp, padding)
 
-    def stop_channel(self, n: int) -> None:
+    def stop_channel(self, n: int, force: bool = True) -> None:
+        """Stop a channel; whatever uses it is aborted first (force=True, the default)."""
+        if not force and n in self.owners:
+            raise ConnError(f"通道{n} 正在被诊断/刷新窗口使用，请先停止")
+        self.abort_users([n])
         with self._lock:
-            if n in self.owners:
-                raise ConnError(f"通道{n} 正在被诊断/刷新窗口使用，请先停止")
             self._stop_locked(n)
         self._notify()
 

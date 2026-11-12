@@ -112,6 +112,9 @@ class LauncherWindow(W.QMainWindow):
         for b in (self.b_home, self.b_scan, self.b_send, self.b_mon, self.b_ft, self.b_crc):
             bh.addWidget(b)
         bh.addStretch(1)
+        self.b_settings = W.QPushButton("设置")
+        self.b_settings.setToolTip("全局设置：地址、时间参数、通道、安全访问密钥 DLL 等（对所有工具生效，永久保存）")
+        bh.addWidget(self.b_settings)
         outer.addWidget(bar)
         # ---- tabs (bottom): tab 0 is the device manager and cannot be closed
         self.tabs = W.QTabWidget()
@@ -135,6 +138,7 @@ class LauncherWindow(W.QMainWindow):
         self.tabs.tabBarDoubleClicked.connect(self._float_at)
         self.b_float.clicked.connect(lambda: self._float_at(self.tabs.currentIndex()))
         self.b_home.clicked.connect(lambda: self.tabs.setCurrentIndex(0))
+        self.b_settings.clicked.connect(self.open_settings)
         for key, b in (("scan", self.b_scan), ("send", self.b_send), ("monitor", self.b_mon), ("ft", self.b_ft), ("crc", self.b_crc)):
             b.clicked.connect(lambda _=False, k=key: self._open(k))
         self._status()
@@ -359,6 +363,15 @@ class LauncherWindow(W.QMainWindow):
             return
         self.tabs.setCurrentIndex(self.tabs.indexOf(win))
         win.show()
+
+    def open_settings(self) -> bool:
+        """The global settings dialog (addresses, timing, channel, security key DLL). Always available, never blocked by a running tool."""
+        from .dialogs import SettingsDialog
+        dlg = SettingsDialog(self.ctx, self.ctx.diag_cfg, self.ctx.channel, self)
+        ok = bool(dlg.exec_())
+        if ok:
+            self.ctx.save()
+        return ok
 
     def _key_of_tab(self, i: int):
         w = self.tabs.widget(i)

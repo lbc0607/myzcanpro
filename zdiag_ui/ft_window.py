@@ -2,7 +2,7 @@
 from typing import Dict, List
 
 from zdiag.ops import Ops, OpsError
-from .common import info, warn
+from .common import warn
 from .qt import Qt, QtCore, QtWidgets as W
 
 
@@ -191,7 +191,8 @@ class FileTransferWindow(W.QWidget):
         self._tick()
 
     def _stop(self) -> None:
-        self.ops.ft_stop(self.role)
+        self.ops.ft_stop(self.role, wait=0)                 # flag only: the window never waits for the worker threads
+        self.b_stop.setEnabled(False)
         self._tick()
 
     # ------------------------------------------------------------------ progress
@@ -226,11 +227,7 @@ class FileTransferWindow(W.QWidget):
             self._last_line = lines[-1]
 
     def closeEvent(self, event) -> None:
-        if self.running():
-            info(self, "文件传输正在进行，请先点「停止」（已传的部分会保留，下次自动续传）。")
-            event.ignore()
-            return
-        self._clock.stop()
+        self._clock.stop()                                   # closing always wins; partial files stay for resuming
         self.ctx.dev.remove_listener(self._on_dev_change)
-        self.ops.shutdown()
+        self.ops.ft_stop(wait=0)
         event.accept()

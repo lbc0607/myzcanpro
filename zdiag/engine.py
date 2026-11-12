@@ -179,6 +179,7 @@ class DiagSession:
         self.uds.auto_keepalive = False
         self.uds.suppress_wait = st.suppress_wait
         self.uds.hook = self._uds_hook
+        self.uds.cancel_check = self.check_cancel
         self.verbose_transfer = False
         self.search_dirs: List[str] = [base_dir]      # where relative file / DLL paths are looked up
         self.last_download: Optional[Tuple[str, List[Segment]]] = None
