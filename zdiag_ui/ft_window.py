@@ -217,7 +217,8 @@ class FileTransferWindow(W.QWidget):
         if st["failed"]:
             txt += f"\n失败: {', '.join(st['failed'][:5])}"
         self.l_state.setText(txt)
-        self.l_links.setText("    ".join(f"{l['name']}: {'在线' if l['alive'] else '离线'}  {l.get('tx_frames', 0)}帧  错误{l.get('errors', 0)}"
+        self.l_links.setText("    ".join(f"{l['name']}: {'在线' if l['alive'] else '离线'}  {l.get('tx_frames', 0)}帧  错误{l.get('errors', 0)}  总线错误帧{l.get('bus_errors', 0)}"
+                                         + (f"  降速{l['backoff_ms']}ms" if l.get('backoff_ms') else "")
                                          for l in st["links"]))
         lines = st["log"]
         if lines and lines[-1] != self._last_line:

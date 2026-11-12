@@ -115,7 +115,7 @@ def main() -> int:
     pump(lambda: not t.running() and ctx.dev.stats_of(0).snapshot()[1] >= 1, 10)
     check("send window transmitted a frame", ctx.dev.stats_of(0).snapshot()[1] >= 1)
     t.b_add.click()
-    check("added to list", t.table.rowCount() == 1 and t.table.item(0, 2).text() == "7E2")
+    check("added to list", t.table.rowCount() == 1 and t.table.item(0, 3).text() == "7E2")
     t.b_list.click()
     pump(lambda: not t.running(), 10)
     check("list send finished", not t.running())

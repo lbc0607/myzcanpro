@@ -304,3 +304,47 @@ class ZlgRxTapTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ZlgDiagnosticsTests(unittest.TestCase):
+    def make(self, lib):
+        from zdiag.zlgcan_bus import DEVICE_TYPES, FD_TYPES, ZlgDevice
+        d = ZlgDevice.__new__(ZlgDevice)
+        d.name, d.dev_type, d.lib, d.handle, d.buses = "USBCAN-II", DEVICE_TYPES["USBCAN-II"], lib, 1, {}
+        d.is_fd_dev = d.dev_type in FD_TYPES
+        return d
+
+    def test_bus_off_is_diagnosed_and_recovered(self):
+        import time as _t
+
+        class Lib(FakeLib):
+            pending = 3
+            def ZCAN_GetReceiveNum(self, chn, t): return self.pending if t == 0 else 0
+            def ZCAN_Receive(self, chn, buf, n, wait):
+                k = min(self.pending, n)
+                for i in range(k): buf[i].frame.err = 1
+                self.pending -= k
+                return k
+            def ZCAN_ReadChannelStatus(self, chn, ref):
+                ref._obj.regStatus, ref._obj.regTECounter, ref._obj.regRECounter = 0x80, 255, 12; return 1
+            def ZCAN_ReadChannelErrInfo(self, chn, ref): ref._obj.error_code = 0x20; return 1
+        lib = Lib()
+        d = self.make(lib)
+        bus = d.start_channel(0, ChannelCfg())
+        end = _t.time() + 3
+        while not bus.recoveries and _t.time() < end: _t.sleep(0.01)
+        h = bus.health(); d.close()
+        self.assertEqual(h["tec"], 255); self.assertEqual(h["rec"], 12); self.assertTrue(h["bus_off"]); self.assertEqual(h["error_code"], 0x20)
+        self.assertEqual(h["recoveries"], 1)                                             # throttled: one restart for the whole burst
+        self.assertEqual(lib.calls.count(("reset",)), 2)                                 # (init no-op) restart + close
+        self.assertEqual(h["err_frames"], 3); self.assertIn("总线关闭", h["events"][-1])
+
+    def test_unconsumed_rx_queue_is_bounded(self):
+        from zdiag.bus import CanFrame
+        d = self.make(FakeLib())
+        bus = d.start_channel(0, ChannelCfg())
+        bus.RX_QUEUE_MAX = 10
+        for i in range(25): bus._put(CanFrame(i, b""))
+        self.assertEqual(bus._q.qsize(), 10); self.assertEqual(bus.q_dropped, 15)
+        self.assertEqual(bus.recv(0.1).can_id, 15)                                       # newest frames are kept
+        d.close()

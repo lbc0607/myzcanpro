@@ -104,6 +104,8 @@ class Link:
         self.last_rx = 0.0
         self.tx_frames = self.rx_frames = self.errors = self.tx_bytes = 0
         self.downs = 0
+        self.backoff = 0.0                                        # seconds slept before every frame while the bus reports error storms
+        self._err_mark = 0
         self.on_change: Optional[Callable[["Link", bool], None]] = None
 
     @property
@@ -121,6 +123,8 @@ class Link:
             data = data.ljust(dlc_len(len(data)), b"\x00")
         fr = CanFrame(can_id, bytes(data), self.cfg.extended, self.fd, self.brs)
         err: Optional[Exception] = None
+        if self.backoff > 0:
+            time.sleep(self.backoff)
         for _ in range(100):                                      # a full device TX buffer clears within a few ms
             try:
                 with self.lock:
@@ -133,6 +137,28 @@ class Link:
                 self.errors += 1
                 time.sleep(0.002)
         raise LinkError(f"{self.name} 发送失败: {err}")
+
+    def bus_errors(self) -> int:
+        st = getattr(self.bus, "stats", None)
+        return getattr(st, "err", 0) if st is not None else 0
+
+    def health(self) -> Dict[str, Any]:
+        fn = getattr(self.bus, "health", None)
+        try:
+            return fn() if callable(fn) else {}
+        except Exception:
+            return {}
+
+    def pace(self) -> bool:
+        """Called ~4x/s by the supervisor: a burst of bus error frames / failed transmits makes this link slow down (and ease off again
+        when it calms down) instead of hammering a sick bus.  True while backed off."""
+        n = self.bus_errors()
+        delta, self._err_mark = n - self._err_mark, n
+        if delta >= 20:
+            self.backoff = min(0.25, max(0.005, self.backoff * 2))
+        elif delta <= 2:
+            self.backoff = 0.0 if self.backoff < 0.003 else self.backoff / 2
+        return self.backoff > 0
 
     def touch(self) -> None:
         """Something arrived from the peer on this link."""
@@ -443,7 +469,23 @@ class Sender:
     @staticmethod
     def _link_info(l: Link) -> Dict[str, Any]:
         return {"name": l.name, "alive": l.alive, "frame_len": l.frame_len, "fd": l.fd, "tx_frames": l.tx_frames,
-                "tx_bytes": l.tx_bytes, "errors": l.errors, "downs": l.downs}
+                "tx_bytes": l.tx_bytes, "errors": l.errors, "downs": l.downs, "bus_errors": l.bus_errors(),
+                "backoff_ms": round(l.backoff * 1000), "health": l.health()}
+
+    @staticmethod
+    def _diag_text(l: Link) -> str:
+        h = l.health()
+        bits = [f"总线错误帧 {l.bus_errors()}"]
+        if "tec" in h:
+            bits.append(f"TEC={h['tec']} REC={h['rec']}" + ("，总线关闭" if h.get("bus_off") else ""))
+        if h.get("recoveries"):
+            bits.append(f"已自动重启通道 {h['recoveries']} 次")
+        if h.get("rx_dropped"):
+            bits.append(f"接收缓冲丢弃 {h['rx_dropped']} 帧")
+        return "，".join(bits)
+
+    def _diag_all(self) -> str:
+        return "；".join(f"{l.name}: {self._diag_text(l)}" for l in self.links) + "。请检查接线、终端电阻(120Ω)、两端波特率/FD 设置是否一致"
 
     def _link_changed(self, l: Link, up: bool) -> None:
         self.log(f"{l.name} {'恢复' if up else '掉线'}" + ("" if up else "，改由其余链路传输"))
@@ -700,9 +742,18 @@ class Sender:
     def _pump(self, fs: _SendFile) -> None:
         """Supervise one file until every chunk is acknowledged."""
         idle_since: Optional[float] = None
+        pace_t = 0.0
         while not self.stop_ev.is_set():
             with self.cond:
                 now = time.monotonic()
+                if now - pace_t >= 0.25:
+                    pace_t = now
+                    for l in self.links:
+                        was = l.backoff > 0
+                        if l.pace() and not was:
+                            self.log(f"{l.name} 总线错误帧激增，自动降速（{self._diag_text(l)}）")
+                        elif was and l.backoff == 0:
+                            self.log(f"{l.name} 总线恢复正常，已恢复全速")
                 for l in self.links:
                     if l.check(now, self.cfg.link_timeout):
                         for c, r in list(fs.inflight.items()):
@@ -717,11 +768,11 @@ class Sender:
                 if any(l.alive for l in self.links):
                     idle_since = None
                     if now - fs.last_progress > self.cfg.idle_timeout:
-                        raise CftError(f"{self.cfg.idle_timeout:g} 秒内没有任何块被确认")
+                        raise CftError(f"{self.cfg.idle_timeout:g} 秒内没有任何块被确认；" + self._diag_all())
                 else:
                     idle_since = idle_since or now
                     if now - idle_since > self.cfg.idle_timeout:
-                        raise CftError("所有链路都断开了")
+                        raise CftError("所有链路都断开了；" + self._diag_all())
                 self.cond.wait(0.01)
 
 
@@ -807,7 +858,8 @@ class Receiver:
                 "failed": list(self.failed), "bytes_total": self.bytes_total, "bytes_done": done, "speed_bps": round(speed),
                 "elapsed_s": round(time.time() - self.started, 1) if self.started else 0,
                 "links": [{"name": l.name, "alive": time.monotonic() - l.last_rx < 2.0 and l.last_rx > 0, "frame_len": l.frame_len,
-                           "fd": l.fd, "tx_frames": l.tx_frames, "rx_frames": l.rx_frames, "errors": l.errors} for l in self.links]}
+                           "fd": l.fd, "tx_frames": l.tx_frames, "rx_frames": l.rx_frames, "errors": l.errors,
+                           "bus_errors": l.bus_errors(), "health": l.health()} for l in self.links]}
 
     # ------------------------------------------------------------ run
     def run(self) -> Dict[str, Any]:

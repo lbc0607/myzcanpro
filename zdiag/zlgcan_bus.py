@@ -10,6 +10,7 @@ Struct layouts / device-type numbers follow the public zlgcan.h / zlgcan_demo.
 Please double check them against the header that ships with your SDK.
 """
 from __future__ import annotations
+import collections
 import ctypes as C
 import os
 import queue
@@ -181,6 +182,30 @@ class ZlgDevice:
             self.handle = None
 
 
+class ZCAN_CHANNEL_ERR_INFO(C.Structure):
+    _pack_ = 1
+    _fields_ = [("error_code", C.c_uint), ("passive_ErrData", C.c_ubyte * 3), ("arLost_ErrData", C.c_ubyte)]
+
+
+class ZCAN_CHANNEL_STATUS(C.Structure):
+    _pack_ = 1
+    _fields_ = [("errInterrupt", C.c_ubyte), ("regMode", C.c_ubyte), ("regStatus", C.c_ubyte), ("regALCapture", C.c_ubyte),
+                ("regECCapture", C.c_ubyte), ("regEWLimit", C.c_ubyte), ("regRECounter", C.c_ubyte), ("regTECounter", C.c_ubyte),
+                ("Reserved", C.c_uint)]
+
+
+def _proto(fn, argtypes) -> None:
+    try:
+        fn.argtypes, fn.restype = argtypes, C.c_uint
+    except AttributeError:                                         # a test double
+        pass
+
+
+BUSOFF_STATUS_BIT = 0x80          # SJA1000-style status register: bit 7 = bus off (regStatus of ZCAN_ReadChannelStatus)
+RECOVER_MIN_GAP = 1.0             # seconds between two automatic bus-off recoveries
+DIAG_MIN_GAP = 0.5                # seconds between two error-info reads
+
+
 class ZlgBus(Bus):
     """One started channel of a ZlgDevice.  Owns the rx thread and the BusStats."""
 
@@ -219,6 +244,10 @@ class ZlgBus(Bus):
         if L.ZCAN_StartCAN(self.chn) != STATUS_OK:
             raise ZlgError(f"通道{ch} 启动失败(ZCAN_StartCAN)")
         self.lib = L
+        self._diag_t = self._recover_t = 0.0
+        self.err_info = {}                                         # last ZCAN_ReadChannelErrInfo/Status result
+        self.recoveries = self.q_dropped = 0
+        self.events: "collections.deque" = collections.deque(maxlen=50)      # (wall time, text) diagnostics, newest last
         self._q: "queue.Queue[CanFrame]" = queue.Queue()
         self._stop = threading.Event()
         self._thr = threading.Thread(target=self._rx_loop, name=f"zlg-rx{ch}", daemon=True)
@@ -231,6 +260,69 @@ class ZlgBus(Bus):
         if self._clk is None or abs(off - self._clk) > 0.5:          # first frame, or the device clock was reset
             self._clk = off
         return dev + self._clk
+
+    # -- diagnostics / recovery (error frames: why, and get out of bus-off)
+    def _note(self, text: str) -> None:
+        self.events.append((time.time(), text))
+
+    def _read_diag(self) -> dict:
+        """TEC/REC, status register and error code of the controller (read at most every DIAG_MIN_GAP s)."""
+        now = time.monotonic()
+        if now - self._diag_t < DIAG_MIN_GAP:
+            return self.err_info
+        self._diag_t = now
+        L = self.lib
+        info = {}
+        try:
+            if hasattr(L, "ZCAN_ReadChannelStatus"):
+                st = ZCAN_CHANNEL_STATUS()
+                _proto(L.ZCAN_ReadChannelStatus, [C.c_void_p, C.POINTER(ZCAN_CHANNEL_STATUS)])
+                if L.ZCAN_ReadChannelStatus(self.chn, C.byref(st)) == STATUS_OK:
+                    info.update(tec=st.regTECounter, rec=st.regRECounter, status=st.regStatus, mode=st.regMode,
+                                bus_off=bool(st.regStatus & BUSOFF_STATUS_BIT) or st.regTECounter >= 255)
+            if hasattr(L, "ZCAN_ReadChannelErrInfo"):
+                ei = ZCAN_CHANNEL_ERR_INFO()
+                _proto(L.ZCAN_ReadChannelErrInfo, [C.c_void_p, C.POINTER(ZCAN_CHANNEL_ERR_INFO)])
+                if L.ZCAN_ReadChannelErrInfo(self.chn, C.byref(ei)) == STATUS_OK:
+                    info["error_code"] = ei.error_code
+        except Exception:
+            return self.err_info
+        if info:
+            self.err_info = info
+        return self.err_info
+
+    def _on_error_frame(self) -> None:
+        info = self._read_diag()
+        if info.get("bus_off") and time.monotonic() - self._recover_t >= RECOVER_MIN_GAP:
+            self._recover_t = time.monotonic()
+            self._recover(f"总线关闭(TEC={info.get('tec')}, REC={info.get('rec')})")
+
+    def _recover(self, why: str) -> None:
+        """Leave bus-off: reset and restart the controller (the device does not always do this by itself)."""
+        try:
+            self.lib.ZCAN_ResetCAN(self.chn)
+            ok = self.lib.ZCAN_StartCAN(self.chn) == STATUS_OK
+            self.recoveries += 1
+            self._note(f"{why}，已重启通道{'成功' if ok else '失败'}（第 {self.recoveries} 次）")
+        except Exception as e:
+            self._note(f"{why}，重启通道出错: {e}")
+
+    def health(self) -> dict:
+        """What is known about the controller's state: counters, last error info, recoveries, recent events."""
+        d = dict(self.err_info)
+        d.update(err_frames=self.stats.err, recoveries=self.recoveries, rx_dropped=self.q_dropped, events=[t for _, t in list(self.events)[-5:]])
+        return d
+
+    RX_QUEUE_MAX = 100_000           # nobody may be consuming (monitor only): keep the newest, never grow without bound
+
+    def _put(self, fr: CanFrame) -> None:
+        if self._q.qsize() >= self.RX_QUEUE_MAX:
+            try:
+                self._q.get_nowait()
+                self.q_dropped += 1
+            except queue.Empty:
+                pass
+        self._q.put(fr)
 
     def _rx_loop(self) -> None:
         L = self.lib
@@ -245,6 +337,7 @@ class ZlgBus(Bus):
                     f = buf[i].frame
                     if f.err:
                         self.stats.count_err()
+                        self._on_error_frame()
                         if self.tap is not None:
                             self.tap.feed_err(self.channel, self._host_ts(buf[i].timestamp))
                         continue
@@ -254,7 +347,7 @@ class ZlgBus(Bus):
                     if self.tap is not None:
                         self.tap.feed(self.channel, fr, "RX", self._host_ts(buf[i].timestamp))
                     if not f.rtr:
-                        self._q.put(fr)
+                        self._put(fr)
                 got = got or k > 0
             if self.use_fd:
                 n = L.ZCAN_GetReceiveNum(self.chn, 1)
@@ -264,6 +357,7 @@ class ZlgBus(Bus):
                         f = fbuf[i].frame
                         if f.err:
                             self.stats.count_err()
+                            self._on_error_frame()
                             if self.tap is not None:
                                 self.tap.feed_err(self.channel, self._host_ts(fbuf[i].timestamp))
                             continue
@@ -273,7 +367,7 @@ class ZlgBus(Bus):
                         if self.tap is not None:
                             self.tap.feed(self.channel, fr, "RX", self._host_ts(fbuf[i].timestamp))
                         if not f.rtr:
-                            self._q.put(fr)
+                            self._put(fr)
                     got = got or k > 0
             if not got:
                 time.sleep(0.0005)
@@ -306,6 +400,7 @@ class ZlgBus(Bus):
             ok = L.ZCAN_Transmit(self.chn, C.byref(t), 1)
         if ok != 1:
             self.stats.count_err()
+            self._on_error_frame()                                 # why: bus-off? (recovers it when so)
             raise ZlgError("发送失败(总线关闭/发送缓冲满/无应答?)")
         self.stats.count_tx(fr)
         if self.tap is not None:

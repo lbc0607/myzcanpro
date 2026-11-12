@@ -274,3 +274,34 @@ class Safety(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ErrorStormPacing(unittest.TestCase):
+    def test_link_backs_off_on_error_burst_and_recovers(self):
+        from zdiag.cft import CftConfig, Link
+
+        class St: err = 0
+        class B:
+            stats = St()
+            def send(self, fr): pass
+        b = B()
+        l = Link(0, b, False, False, CftConfig())
+        self.assertFalse(l.pace())
+        b.stats.err += 500; self.assertTrue(l.pace()); self.assertGreater(l.backoff, 0)
+        first = l.backoff
+        b.stats.err += 500; l.pace(); self.assertGreater(l.backoff, first)             # keeps slowing down while it lasts
+        self.assertLessEqual(l.backoff, 0.25)
+        for _ in range(12): l.pace()                                                    # calm again -> full speed
+        self.assertEqual(l.backoff, 0.0)
+
+    def test_link_info_carries_bus_health(self):
+        from zdiag.cft import CftConfig, Link, Sender
+
+        class St: err = 7
+        class B:
+            stats = St()
+            def health(self): return {"tec": 130, "rec": 4, "bus_off": False, "recoveries": 2}
+        l = Link(0, B(), False, False, CftConfig())
+        info = Sender._link_info(l)
+        self.assertEqual((info["bus_errors"], info["health"]["tec"]), (7, 130))
+        self.assertIn("TEC=130", Sender._diag_text(l)); self.assertIn("重启通道 2 次", Sender._diag_text(l))
