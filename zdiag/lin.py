@@ -65,6 +65,10 @@ class LinMaster(ABC):
     def close(self) -> None:
         pass
 
+    def uds_request(self, nad: int, pdu: bytes, p2: float):
+        """Drivers whose library runs the UDS transport itself (ZLG) return {"ok", "data" | "nrc", "error"} here; None = use LinTp."""
+        return None
+
 
 # --------------------------------------------------------------------------- transport (NAD + PCI)
 class LinTp:
@@ -273,6 +277,9 @@ def client(master: LinMaster, nad: int, p2: float = 0.3) -> UdsClient:
 
 def request(master: LinMaster, nad: int, pdu: bytes, p2: float = 0.3) -> Dict[str, Any]:
     """One UDS request to a node -> {"ok", "data"} | {"ok": False, "nrc", "error"}."""
+    direct = master.uds_request(nad, pdu, p2)
+    if direct is not None:
+        return direct
     try:
         rsp = client(master, nad, p2).request(pdu)
         return {"ok": True, "data": rsp}

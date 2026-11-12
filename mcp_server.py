@@ -223,10 +223,10 @@ async def channel_stop(channel: int) -> Dict[str, Any]:
 
 # --------------------------------------------------------------------------- LIN (UDS over LIN, oil pump scan)
 @mcp.tool()
-async def lin_open(kind: str = "sim", channel: int = 0, baud: int = 19200, device: str = "", dll: str = "") -> Dict[str, Any]:
-    """Open the LIN channel. kind='sim' = simulated oil pump (NAD 21) for a dry run; kind='zlg' = the ZLG box's LIN channel
-    (the low-level binding still needs the SDK's LIN definitions and reports that). baud default 19200."""
-    return await call("lin_open", kind=kind, channel=channel, baud=baud, device=device, dll=dll)
+async def lin_open(kind: str = "sim", channel: int = 0, baud: int = 19200, chksum: int = 1) -> Dict[str, Any]:
+    """Open the LIN channel. kind='sim' = simulated oil pump (NAD 21) for a dry run; kind='zlg' = LIN channel `channel` of the
+    already opened ZLG device (UDS over LIN via zlgcan). baud default 19200; chksum 1 classic / 2 enhanced."""
+    return await call("lin_open", kind=kind, channel=channel, baud=baud, chksum=chksum)
 
 
 @mcp.tool()

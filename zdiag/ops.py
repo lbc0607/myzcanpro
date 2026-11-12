@@ -746,9 +746,10 @@ class Ops:
             raise OpsError("LIN 通道还没有打开：先调用 lin_open")
         return self._lin["master"]
 
-    def lin_open(self, kind: str = "sim", channel: int = 0, baud: int = 19200, device: str = "", dll: str = "") -> Dict[str, Any]:
-        """Open the LIN channel. kind = "sim" (simulated oil pump on NAD 21) | "zlg" (ZLG box LIN channel; needs the SDK LIN
-        definitions, not wired yet). baud: LIN bit rate, 19200 by default (valid 1000..20000)."""
+    def lin_open(self, kind: str = "sim", channel: int = 0, baud: int = 19200, chksum: int = 1) -> Dict[str, Any]:
+        """Open the LIN channel. kind = "sim" (simulated oil pump on NAD 21) | "zlg" (the LIN channel `channel` of the already opened
+        ZLG device, UDS over LIN through zlgcan's LIN UDS service). baud: LIN bit rate, 19200 by default (1000..20000).
+        chksum: 1 classic (default, what diagnostic frames use) | 2 enhanced."""
         if kind not in ("sim", "zlg"):
             raise OpsError('kind 应为 "sim" 或 "zlg"')
         baud = _int(baud, "LIN 波特率", 1000, 20000)
@@ -759,7 +760,7 @@ class Ops:
         else:
             from . import zlglin
             try:
-                master = zlglin.open_zlg(dll, device, _int(channel, "通道", 0, 15), baud)
+                master = zlglin.open_zlg(self.ctx.dev.device, _int(channel, "LIN 通道", 0, 15), baud, _int(chksum, "校验方式", 1, 2))
             except linmod.LinError as e:
                 raise OpsError(str(e))
         self._lin = {"master": master, "kind": kind, "channel": int(channel), "baud": baud}

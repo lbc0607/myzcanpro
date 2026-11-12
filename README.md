@@ -114,5 +114,5 @@ Claude Code：`claude mcp add canvds -e CANVDS_HOME=D:/myzcanpro -- python D:/my
 ## LIN 诊断（扫描油泵等 LIN 节点）
 UDS over LIN：传输层为 NAD + PCI，主请求帧 0x3C / 从应答帧 0x3D（经典校验和），支持单帧/多帧，复用现有 UDS 客户端（NRC 0x78 等照常处理）。
 - 工具（MCP / 本机端口，方法名相同）：`lin_open`（kind=sim 模拟油泵 NAD 21 / kind=zlg）、`lin_close`、`lin_request`（对某 NAD 发任意 UDS，如 `22 F1 87`）、`lin_scan_nodes`（TesterPresent 逐个 NAD 探测）、`lin_scan_pump`（读油泵信息：默认标准标识 DID F187/F189/F18A/F18C/F191/F193/F195，可自定义 DID 与解析方式）。
-- 代码：`zdiag/lin.py`（传输、模拟从节点、扫描）、`zdiag/zlglin.py`（周立功 LIN 通道绑定，**尚未接入**：需要设备 SDK 中 zlgcan.h 的 LIN 结构体定义，不能凭记忆猜内存布局）。
+- 代码：`zdiag/lin.py`（传输、模拟从节点、扫描）、`zdiag/zlglin.py`（周立功 LIN 通道绑定，已按 SDK 的 zlgcan.h 接入：`ZCAN_InitLIN/StartLIN` + `ZCAN_UDS_RequestEX`(LIN UDS)，由设备库完成 NAD/PCI 传输；使用前须先在设备管理里打开设备，`lin_open kind=zlg channel=<LIN 通道号> baud=19200 chksum=1`。**尚未在真机上验证**）。
 - 现状：以上在模拟器上验证；真机需要补 `zlglin.py`，并确认油泵的 NAD、波特率（默认 19200）、校验模式和油泵专有 DID。
