@@ -41,7 +41,7 @@ class ChannelPanel(W.QFrame):
             h.addWidget(lb)
 
 
-TOOLS = [("scan", "软件扫描"), ("send", "普通发送"), ("monitor", "报文监视"), ("crc", "校验码计算工具")]
+TOOLS = [("scan", "软件扫描"), ("send", "普通发送"), ("monitor", "报文监视"), ("ft", "文件传输"), ("crc", "校验码计算工具")]
 TITLES = dict(TOOLS)
 
 
@@ -107,9 +107,9 @@ class LauncherWindow(W.QMainWindow):
         brand.setObjectName("brand")
         bh.addWidget(brand)
         self.b_home = W.QPushButton("设备管理")
-        self.b_scan = W.QPushButton("软件扫描")
+        self.b_scan, self.b_ft = W.QPushButton("软件扫描"), W.QPushButton("文件传输")
         self.b_send, self.b_mon, self.b_crc = W.QPushButton("普通发送"), W.QPushButton("报文监视"), W.QPushButton("校验码计算工具")
-        for b in (self.b_home, self.b_scan, self.b_send, self.b_mon, self.b_crc):
+        for b in (self.b_home, self.b_scan, self.b_send, self.b_mon, self.b_ft, self.b_crc):
             bh.addWidget(b)
         bh.addStretch(1)
         outer.addWidget(bar)
@@ -135,7 +135,7 @@ class LauncherWindow(W.QMainWindow):
         self.tabs.tabBarDoubleClicked.connect(self._float_at)
         self.b_float.clicked.connect(lambda: self._float_at(self.tabs.currentIndex()))
         self.b_home.clicked.connect(lambda: self.tabs.setCurrentIndex(0))
-        for key, b in (("scan", self.b_scan), ("send", self.b_send), ("monitor", self.b_mon), ("crc", self.b_crc)):
+        for key, b in (("scan", self.b_scan), ("send", self.b_send), ("monitor", self.b_mon), ("ft", self.b_ft), ("crc", self.b_crc)):
             b.clicked.connect(lambda _=False, k=key: self._open(k))
         self._status()
 
@@ -336,6 +336,9 @@ class LauncherWindow(W.QMainWindow):
         if which == "send":
             from .send_window import SendWindow
             return SendWindow(self.ctx)
+        if which == "ft":
+            from .ft_window import FileTransferWindow
+            return FileTransferWindow(self.ctx)
         from .dialogs import CrcToolDialog
         d = CrcToolDialog(self.ctx)
         d.setWindowFlags(Qt.Widget)                    # a dialog would otherwise stay a separate window

@@ -79,6 +79,14 @@ def main() -> int:
     for key in ("send", "monitor", "scan", "crc"):
         L._open(key)
         check(f"window {key} shows", L.windows[key].isVisible())
+    L._open("ft")                                            # 文件传输: builds, role switch shows the right group, closes cleanly
+    ft = L.windows["ft"]
+    ft.c_role.setCurrentIndex(1)
+    check("文件传输 window: receive role shows the receive group", ft.isVisible() and ft.g_recv.isVisible() and not ft.g_send.isVisible())
+    check("文件传输 window lists the started channels", sorted(ft._boxes) == [0, 1])
+    ft.c_role.setCurrentIndex(0)
+    L.close_tool("ft")
+    check("文件传输 window closed", "ft" not in L.windows and ctx.dev.owners == {})
     dlg = dialogs.SettingsDialog(ctx, ctx.diag_cfg, ctx.channel)
     dlg.show()
     dlg.btn_ok.click()

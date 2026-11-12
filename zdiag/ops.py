@@ -20,6 +20,7 @@ from .project import (DEVICES, SIM_DEVICE, Addressing, DiagConfig, fmt_hex, new_
 from .scanlib import (INFO_FIELDS, Executor, ScanError, ScanStore, cfg_for, default_skip, function_paths, render_result,
                       run_executor)
 from .sendlist import FD_LENGTHS, SendItem, run_send
+from . import cft as cftmod
 from . import lin as linmod
 
 MAX_FRAMES = 100000                 # one frame_send call
@@ -93,6 +94,7 @@ class Ops:
         self._finished: Dict[str, dict] = {}                   # key -> summary of a sender that has ended
         self._keepalive: Dict[int, Any] = {}                   # channel -> DiagSession holding a 3E keep-alive
         self._job: Optional[dict] = None                       # the running / last 功能 started with function_start
+        self._ft: Dict[str, Any] = {}                         # file-transfer jobs by role ("send" / "receive")
         self._lin: Optional[dict] = None                       # the open LIN master: {"master","kind","channel","baud"}
 
     # ------------------------------------------------------------------ channel ownership
@@ -195,6 +197,7 @@ class Ops:
         self.keepalive_stop(n)
 
     def _stop_all_ours(self) -> None:
+        self.ft_stop()
         self.lin_close()
         for k in list(self._senders):
             self._stop_sender(k)
@@ -740,6 +743,104 @@ class Ops:
             if not 0 <= getattr(c.addr, nm) <= limit:
                 raise OpsError(f"diag.addr.{nm} 超出{'扩展' if c.addr.extended else '标准'}帧 ID 范围")
 
+    # ------------------------------------------------------------------ CAN file transfer (zdiag/cft.py)
+    def _ft_open(self, ch: int):
+        """(bus, fd, brs, release) of a started channel for the file transfer (tests replace this)."""
+        bus, _ = self._bus(ch)
+        cfg = self.ctx.dev.cfg_of(ch)
+        return bus, bool(cfg and cfg.is_fd), bool(cfg and cfg.brs), lambda: self._drop(ch)
+
+    def _ft_config(self, base_id: str, chunk_bytes: int, window: int, fd_frame_len: int, extended: bool, overwrite: bool = True,
+                   link_timeout_ms: int = 600, idle_timeout_s: int = 30):
+        try:
+            c = cftmod.CftConfig(base_id=parse_id(base_id) if isinstance(base_id, str) else int(base_id), extended=bool(extended),
+                                 chunk_bytes=_int(chunk_bytes, "块大小", 64, 15000), window=_int(window, "窗口", 1, 128),
+                                 fd_frame_len=_int(fd_frame_len, "FD 帧长度", 12, 64), overwrite=bool(overwrite),
+                                 link_timeout=_int(link_timeout_ms, "链路超时(ms)", 100, 10000) / 1000.0,
+                                 idle_timeout=float(_int(idle_timeout_s, "无进展超时(s)", 2, 86400)))
+            c.validate()
+        except (ValueError, cftmod.CftError) as e:
+            raise OpsError(str(e))
+        return c
+
+    def _ft_start(self, role: str, channels: List[int], cfg, make) -> Dict[str, Any]:
+        chans = [int(c) for c in (channels if isinstance(channels, (list, tuple)) else [channels])]
+        if not chans or len(set(chans)) != len(chans):
+            raise OpsError("channels 需要 1~2 个不重复的通道号，例如 [0, 1]")
+        with self.lock:
+            if role in self._ft and self._ft[role].running():
+                raise OpsError("已有这个方向的文件传输在进行，请先 ft_stop")
+            busy = {c for j in self._ft.values() if j.running() for c in j.channels}
+        if busy & set(chans):
+            raise OpsError(f"通道 {sorted(busy & set(chans))} 正被另一个文件传输使用")
+        opened, links = [], []
+        try:
+            for i, ch in enumerate(chans):
+                bus, fd, brs, rel = self._ft_open(ch)
+                opened.append(rel)
+                links.append(cftmod.Link(i, bus, fd, brs, cfg, f"通道{ch}"))
+            engine = make(links)
+        except Exception as e:
+            for rel in opened:
+                rel()
+            raise OpsError(str(e))
+
+        def done() -> None:
+            for rel in opened:
+                rel()
+        job = cftmod.CftJob(engine, engine._runner, done)
+        job.channels = chans
+        with self.lock:
+            self._ft[role] = job
+        job.start()
+        return {"started": True, "role": role, "channels": chans, "message": "已开始，用 ft_status 查看进度"}
+
+    def ft_send(self, channels: List[int], paths: List[str], base_id: str = "6A0", chunk_bytes: int = 1024, window: int = 128,
+                fd_frame_len: int = 64, extended: bool = False, link_timeout_ms: int = 600, idle_timeout_s: int = 30) -> Dict[str, Any]:
+        """Send files / whole folders to a peer running ft_receive, over 1~2 CAN / CAN FD channels (background job).
+        With two channels the file is split between them; if one goes silent the other carries on and the lost one is used again when it
+        returns. A transfer that was interrupted continues where it stopped when the same files are sent again."""
+        ps = [paths] if isinstance(paths, str) else list(paths or [])
+        if not ps:
+            raise OpsError("需要要发送的文件或文件夹路径 (paths)")
+        for p in ps:
+            if not os.path.exists(p):
+                raise OpsError(f"路径不存在: {p}")
+        cfg = self._ft_config(base_id, chunk_bytes, window, fd_frame_len, extended, True, link_timeout_ms, idle_timeout_s)
+
+        def make(links):
+            e = cftmod.Sender(links, cfg)
+            e._runner = lambda: e.run(ps)
+            return e
+        return self._ft_start("send", channels, cfg, make)
+
+    def ft_receive(self, channels: List[int], dest: str, base_id: str = "6A0", overwrite: bool = True, once: bool = True,
+                   chunk_bytes: int = 1024, window: int = 128, fd_frame_len: int = 64, extended: bool = False) -> Dict[str, Any]:
+        """Receive into the folder `dest` (created when missing); base_id / extended / fd_frame_len must match the sender.
+        once=True ends after one sender finished, False keeps listening until ft_stop. Partial files stay as <name>.cftpart for resuming."""
+        if not dest:
+            raise OpsError("需要保存目录 (dest)")
+        cfg = self._ft_config(base_id, chunk_bytes, window, fd_frame_len, extended, overwrite)
+
+        def make(links):
+            e = cftmod.Receiver(links, dest, cfg, once=bool(once))
+            e._runner = e.run
+            return e
+        return self._ft_start("receive", channels, cfg, make)
+
+    def ft_status(self) -> Dict[str, Any]:
+        out = {r: j.status() for r, j in self._ft.items()}
+        return {"jobs": out, "active": [r for r, j in self._ft.items() if j.running()]} if out else {"jobs": {}, "active": [],
+                                                                                                          "message": "还没有文件传输"}
+
+    def ft_stop(self, role: str = "") -> Dict[str, Any]:
+        jobs = [j for r, j in self._ft.items() if j.running() and role in ("", r)]
+        for j in jobs:
+            j.engine.stop()
+        for j in jobs:
+            j.thread.join(timeout=10)
+        return {"message": f"已停止 {len(jobs)} 个文件传输" if jobs else "没有正在进行的文件传输", **self.ft_status()}
+
     # ------------------------------------------------------------------ LIN (UDS over LIN)
     def _lin_master(self):
         if self._lin is None:
@@ -852,4 +953,5 @@ METHODS = ["status", "device_list", "device_open", "device_close", "channel_star
            "frame_send", "cyclic_start", "cyclic_stop", "cyclic_list",
            "monitor_trace", "monitor_snapshot", "monitor_capture", "monitor_clear", "record_start", "record_stop",
            "settings_get", "settings_set",
-           "lin_open", "lin_close", "lin_status", "lin_request", "lin_scan_nodes", "lin_scan_pump"]
+           "lin_open", "lin_close", "lin_status", "lin_request", "lin_scan_nodes", "lin_scan_pump",
+           "ft_send", "ft_receive", "ft_status", "ft_stop"]

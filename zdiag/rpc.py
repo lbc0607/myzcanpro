@@ -21,7 +21,7 @@ from .ops import METHODS, Ops, OpsError
 ENDPOINT_FILE = "CanVDS_rpc.json"
 MAX_BODY = 4 * 1024 * 1024
 # quick / read-only / must-stay-responsive methods run concurrently; everything that talks on a bus is serialised
-FREE = {"status", "device_list", "modules", "settings_get", "monitor_trace", "monitor_snapshot", "monitor_capture", "monitor_clear",
+FREE = {"ft_status", "ft_stop", "status", "device_list", "modules", "settings_get", "monitor_trace", "monitor_snapshot", "monitor_capture", "monitor_clear",
         "cyclic_list", "cyclic_stop", "keepalive_stop", "record_start", "record_stop", "lin_status", "lin_close"}
 
 

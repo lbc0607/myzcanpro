@@ -12,6 +12,7 @@ from zdiag.crc import PRESETS
 from zdiag_ui.appctx import AppContext
 from zdiag_ui.launcher import LauncherWindow
 from zdiag_ui.send_window import SendWindow
+from zdiag_ui.ft_window import FileTransferWindow
 from zdiag_ui.monitor_window import MonitorWindow
 from zdiag_ui import scan_window as _sw
 from zdiag_ui.scan_window import ScanWindow
@@ -569,6 +570,64 @@ class SecurityGlobalTests(Base):
         d.e_sid.setText("BA"); d.e_name.setText("厂商服务"); d._sub_row("01", "子功能")
         d.b_ok.click()
         self.assertEqual(self.ctx.services[-1]["sid"], 0xBA); self.assertTrue(os.path.isfile(self.ctx.services_path))
+
+
+class FileTransferTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.win = FileTransferWindow(self.ctx)
+        self.addCleanup(lambda: (self.win.ops.ft_stop(), self.win.close()))
+
+    def up(self, *chs):
+        for c in chs:
+            if c not in self.ctx.dev.started():
+                self.ctx.dev.start_channel(c, ChannelCfg())
+        self.win._on_dev_change()
+
+    def test_role_switch_and_validation(self):
+        w = self.win
+        w.c_role.setCurrentIndex(1)
+        self.assertEqual((w.role, w.b_start.text()), ("receive", "开始接收"))
+        w.c_role.setCurrentIndex(0)
+        self.assertEqual((w.role, w.b_start.text()), ("send", "开始发送"))
+        w.b_start.click()                                                  # no channel started
+        self.assertTrue(msgs("warn"))
+        self.up(0)
+        W.QMessageBox.calls.clear(); w.b_start.click()                    # channel ok, nothing to send
+        self.assertTrue(msgs("warn")); self.assertFalse(w.running())
+
+    def test_channel_boxes_follow_the_device(self):
+        self.up(0, 1)
+        self.assertEqual(sorted(self.win._boxes), [0, 1])
+        self.assertEqual(self.win.selected_channels(), [0])               # first one preselected
+        self.win._boxes[1].setChecked(True)
+        self.assertEqual(self.win.selected_channels(), [0, 1])
+        self.win._on_dev_change(); self.assertEqual(self.win.selected_channels(), [0, 1])   # the choice survives a refresh
+
+    def test_receive_start_stop_and_close_veto(self):
+        import tempfile
+        self.up(0)
+        w = self.win
+        w.c_role.setCurrentIndex(1)
+        w.e_dest.setText(tempfile.mkdtemp()); w.k_loop.setChecked(True)
+        w.b_start.click()
+        self.assertTrue(w.running()); self.assertTrue(w.b_stop.isEnabled() and not w.b_start.isEnabled())
+        W.QMessageBox.calls.clear()
+        ev = type("E", (), {"ok": None, "accept": lambda s: setattr(s, "ok", True), "ignore": lambda s: setattr(s, "ok", False)})()
+        w.closeEvent(ev); self.assertFalse(ev.ok); self.assertTrue(msgs())     # refuses while a transfer runs
+        w.b_stop.click()
+        self.assertFalse(w.running()); self.assertTrue(w.b_start.isEnabled())
+        self.assertEqual(self.ctx.dev.owners, {})                          # channel handed back
+        ev2 = type("E", (), {"ok": None, "accept": lambda s: setattr(s, "ok", True), "ignore": lambda s: setattr(s, "ok", False)})()
+        w.closeEvent(ev2); self.assertTrue(ev2.ok)
+
+    def test_busy_channel_is_reported(self):
+        self.up(0)
+        w = self.win
+        tok = object(); self.ctx.dev.acquire(0, tok)                        # another window holds the channel
+        w.c_role.setCurrentIndex(1); w.e_dest.setText("x"); W.QMessageBox.calls.clear(); w.b_start.click()
+        self.assertTrue(msgs("warn")); self.assertFalse(w.running())
+        self.ctx.dev.release(tok)
 
 
 class CrcUiTests(Base):

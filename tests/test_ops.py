@@ -152,6 +152,60 @@ class GlobalKey(Base):
         self.assertEqual(self.ops.settings_get("security")["security"]["key_dll"], "builtin:xor")
 
 
+class FileTransferOps(Base):
+    """ft_* through the ops layer: the sender and receiver jobs run side by side on in-memory cables (channels 0/1 <-> 2/3)."""
+    def setUp(self):
+        super().setUp()
+        import sys
+        sys.path.insert(0, os.path.dirname(__file__))
+        from test_cft import Cable
+        self.cables = {0: Cable(1), 1: Cable(2)}
+        self.released = []
+
+        def fake(ch):
+            c = self.cables[ch % 2]
+            return (c.s if ch < 2 else c.r), True, True, lambda: self.released.append(ch)
+        self.ops._ft_open = fake
+
+    def wait(self, role, secs=40):
+        end = time.time() + secs
+        while time.time() < end:
+            st = self.ops.ft_status()["jobs"].get(role)
+            if st and not st["running"]:
+                return st
+            time.sleep(0.05)
+        self.fail("transfer did not finish")
+
+    def test_send_and_receive_through_ops(self):
+        src = os.path.join(self.ctx.dir, "src_ft"); dst = os.path.join(self.ctx.dir, "dst_ft")
+        os.makedirs(os.path.join(src, "sub"))
+        for rel, n in (("a.bin", 30_000), ("sub/b.txt", 777)):
+            with open(os.path.join(src, *rel.split("/")), "wb") as f: f.write(os.urandom(n))
+        r = self.ops.ft_receive([2, 3], dst); self.assertTrue(r["started"], r)
+        s = self.ops.ft_send([0, 1], [src]); self.assertTrue(s["started"], s)
+        st = self.wait("send"); rv = self.wait("receive")
+        self.assertEqual((st["state"], st["files_done"]), ("done", 2), st["error"])
+        self.assertEqual(rv["state"], "done")
+        for rel in ("a.bin", "sub/b.txt"):
+            with open(os.path.join(src, *rel.split("/")), "rb") as a, open(os.path.join(dst, "src_ft", *rel.split("/")), "rb") as b:
+                self.assertEqual(a.read(), b.read())
+        self.assertEqual(sorted(self.released), [0, 1, 2, 3])                                   # channels handed back
+        self.assertEqual(self.ops.ft_status()["active"], [])
+
+    def test_argument_errors_and_busy_channel(self):
+        with self.assertRaises(OpsError): self.ops.ft_send([0], [])
+        with self.assertRaises(OpsError): self.ops.ft_send([0, 0], [self.ctx.dir])
+        with self.assertRaises(OpsError): self.ops.ft_send([0], ["/no/such/path"])
+        with self.assertRaises(OpsError): self.ops.ft_receive([0], "")
+        with self.assertRaises(OpsError): self.ops.ft_receive([0], self.ctx.dir, base_id="zz")
+        d = os.path.join(self.ctx.dir, "wait_dst")
+        self.assertTrue(self.ops.ft_receive([2], d, once=False)["started"])
+        with self.assertRaises(OpsError): self.ops.ft_receive([3], d)                           # one receive job at a time
+        with self.assertRaises(OpsError): self.ops.ft_send([2], [self.ctx.dir])                 # channel 2 is busy
+        self.assertEqual(self.ops.ft_status()["active"], ["receive"])
+        self.assertIn("已停止 1", self.ops.ft_stop()["message"]); self.assertEqual(self.ops.ft_status()["active"], [])
+
+
 class Api(unittest.TestCase):
     def test_methods_exist(self):
         for m in METHODS: self.assertTrue(callable(getattr(Ops, m)), m)

@@ -256,6 +256,41 @@ async def lin_scan_pump(nad: str, dids: Optional[List[Any]] = None, session: boo
     return await call("lin_scan_pump", nad=nad, dids=dids, session=session, p2_ms=p2_ms)
 
 
+# --------------------------------------------------------------------------- CAN file transfer
+@mcp.tool()
+async def ft_send(channels: List[int], paths: List[str], base_id: str = "6A0", chunk_bytes: int = 1024, window: int = 128,
+                  fd_frame_len: int = 64, extended: bool = False, link_timeout_ms: int = 600, idle_timeout_s: int = 30) -> Dict[str, Any]:
+    """Send files and/or whole folders over CAN / CAN FD to a peer running ft_receive (any file type, background job, poll ft_status).
+    channels: 1 or 2 started channel numbers, e.g. [0, 1]; with two, the file is split between them and if one goes silent the other
+    carries on (and the lost one is used again when it returns). CAN FD channels use long frames automatically (fd_frame_len 64).
+    An interrupted transfer resumes where it stopped when the same paths are sent again. base_id (hex) = first of 3 consecutive CAN IDs;
+    base_id / extended / fd_frame_len / chunk_bytes should be identical on both ends."""
+    return await call("ft_send", channels=channels, paths=paths, base_id=base_id, chunk_bytes=chunk_bytes, window=window,
+                      fd_frame_len=fd_frame_len, extended=extended, link_timeout_ms=link_timeout_ms, idle_timeout_s=idle_timeout_s)
+
+
+@mcp.tool()
+async def ft_receive(channels: List[int], dest: str, base_id: str = "6A0", overwrite: bool = True, once: bool = True,
+                     chunk_bytes: int = 1024, window: int = 128, fd_frame_len: int = 64, extended: bool = False) -> Dict[str, Any]:
+    """Receive files / folders sent by ft_send into folder `dest` (background job, poll ft_status). Start it BEFORE the sender.
+    once=True stops after one sender finished; False keeps listening until ft_stop. Unfinished files stay as <name>.cftpart (+ .cftmeta)
+    and are continued by the next transfer of the same file. overwrite=False keeps an existing different file."""
+    return await call("ft_receive", channels=channels, dest=dest, base_id=base_id, overwrite=overwrite, once=once,
+                      chunk_bytes=chunk_bytes, window=window, fd_frame_len=fd_frame_len, extended=extended)
+
+
+@mcp.tool()
+async def ft_status() -> Dict[str, Any]:
+    """Progress of the file transfers: state, current file, bytes done / total, speed, per-link state (alive, frames, errors), log."""
+    return await call("ft_status")
+
+
+@mcp.tool()
+async def ft_stop(role: str = "") -> Dict[str, Any]:
+    """Stop the file transfer(s) ('send', 'receive' or '' = all). Partial data is kept for resuming."""
+    return await call("ft_stop", role=role)
+
+
 # --------------------------------------------------------------------------- diagnostics
 @mcp.tool()
 async def uds_request(channel: int, pdu: str, module: str = "", phys: str = "", resp: str = "", func: str = "",
