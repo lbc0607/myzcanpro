@@ -1,5 +1,6 @@
 """普通发送 window: raw CAN / CAN FD frame sending (single frames and a send list)."""
 import threading
+from dataclasses import replace
 from typing import List, Optional
 
 from zdiag.devmgr import ConnError
@@ -9,9 +10,9 @@ from zdiag.sendlist import (FD_LENGTHS, PARALLEL, SERIAL, SendItem, SendResult, 
 from .common import Worker, fill_channel_combo, info, orphan, pick_file, save_file, warn
 from .qt import Qt, QtCore, QtWidgets as W, Signal
 
-HEADERS = ["序号", "状态", "ID(0x)", "协议", "长度", "名称", "数据", "帧类型", "每次发送帧数", "发送次数", "每次间隔(ms)"]
+HEADERS = ["序号", "状态", "通道", "ID(0x)", "协议", "长度", "名称", "数据", "帧类型", "每次发送帧数", "发送次数", "每次间隔(ms)"]
 FILTER = "发送列表 (*.json);;所有文件 (*.*)"
-EDITABLE = (2, 5, 6, 8, 9, 10)
+EDITABLE = (2, 3, 6, 7, 9, 10, 11)
 
 
 class _Status(QtCore.QObject):
@@ -112,12 +113,12 @@ class SendTab(W.QWidget):
         n = self.c_ch.currentData()
         return -1 if n is None else n
 
-    def _is_fd(self) -> bool:
-        cfg = self.ctx.dev.cfg_of(self._channel())
+    def _is_fd(self, ch: Optional[int] = None) -> bool:
+        cfg = self.ctx.dev.cfg_of(self._channel() if ch is None or ch < 0 else ch)
         return bool(cfg and cfg.is_fd)
 
-    def _protocol_text(self) -> str:
-        cfg = self.ctx.dev.cfg_of(self._channel())
+    def _protocol_text(self, ch: Optional[int] = None) -> str:
+        cfg = self.ctx.dev.cfg_of(self._channel() if ch is None or ch < 0 else ch)
         return cfg.protocol if cfg else "CAN"
 
     def on_dev_change(self) -> None:
@@ -148,8 +149,9 @@ class SendTab(W.QWidget):
                 data=b"" if remote else parse_hex(self.e_data.text()),
                 per_send=int(self.e_per.text()), count=int(self.e_count.text()),
                 interval_ms=int(self.e_int.text()), id_inc=self.k_idinc.isChecked(),
-                data_inc=self.k_datainc.isChecked(), name=self.e_name.text().strip())
-            it.validate(self._is_fd())
+                data_inc=self.k_datainc.isChecked(), name=self.e_name.text().strip(),
+                channel=self._channel())                              # a row is added with the channel selected above
+            it.validate(self._is_fd(it.channel))
         except ValueError as e:
             warn(self, f"发送参数无效: {e}")
             return None
@@ -167,15 +169,18 @@ class SendTab(W.QWidget):
         self.k_idinc.setChecked(it.id_inc)
         self.k_datainc.setChecked(it.data_inc)
         self.e_name.setText(it.name)
+        i = self.c_ch.findData(it.channel)
+        if i >= 0 and i != self.c_ch.currentIndex():
+            self.c_ch.setCurrentIndex(i)                            # (also refreshes the length list for that channel)
 
     # ------------------------------------------------------------------ list
     def _render(self, select: int = -1) -> None:
-        proto = self._protocol_text()
         self.table.blockSignals(True)
         self.table.setRowCount(len(self.items))
         for r, it in enumerate(self.items):
             shown = bytes(it.length).hex(" ").upper() if it.remote else frame_at(it, 0).data.hex(" ").upper()
-            cells = [str(r + 1), "", f"{it.can_id:X}", proto, str(it.length), it.name,
+            cells = [str(r + 1), "", "?" if it.channel < 0 else str(it.channel), f"{it.can_id:X}",
+                     self._protocol_text(it.channel), str(it.length), it.name,
                      "(远程帧)" if it.remote else shown, ("扩展" if it.extended else "标准") + ("远程帧" if it.remote else "数据帧"),
                      str(it.per_send), str(it.count), str(it.interval_ms)]
             for c, text in enumerate(cells):
@@ -242,21 +247,25 @@ class SendTab(W.QWidget):
         try:
             new = SendItem.from_dict(it.to_dict())
             if c == 2:
+                new.channel = int(text)
+                if new.channel not in self.ctx.dev.started():
+                    raise ValueError(f"通道 {new.channel} 没有启动（已启动: {', '.join(map(str, self.ctx.dev.started())) or '无'}）")
+            elif c == 3:
                 new.can_id = parse_id(text)
-            elif c == 5:
-                new.name = text
             elif c == 6:
+                new.name = text
+            elif c == 7:
                 new.data = parse_hex(text)
                 if len(new.data) > new.length:                  # grow the length to the next legal size
-                    legal = FD_LENGTHS if self._is_fd() else range(9)
+                    legal = FD_LENGTHS if self._is_fd(new.channel) else range(9)
                     new.length = next((n for n in legal if n >= len(new.data)), len(new.data))
-            elif c == 8:
-                new.per_send = int(text)
             elif c == 9:
-                new.count = int(text)
+                new.per_send = int(text)
             elif c == 10:
+                new.count = int(text)
+            elif c == 11:
                 new.interval_ms = int(text)
-            new.validate(self._is_fd())
+            new.validate(self._is_fd(new.channel))
             self.items[r] = new
         except ValueError as e:
             warn(self, f"无效的值: {e}")
@@ -315,17 +324,22 @@ class SendTab(W.QWidget):
                     stop=self.c_fail.currentIndex() == 0)
 
     def _start(self, items: List[SendItem], rows: List[int], mode: str, speed: float, stop: bool) -> None:
-        n = self._channel()
+        default = self._channel()
+        items = [replace(it, channel=default) if it.channel < 0 else it for it in items]    # old lists without a channel
+        bus, fd, brs = {}, {}, {}
         try:
             for it in items:
-                it.validate(self._is_fd())
-            bus = self.ctx.dev.acquire(n, self, self.ctx.diag_cfg.addr, self.ctx.channel.sim_profile,
-                                       self.ctx.diag_cfg.settings.rx_padding)
+                it.validate(self._is_fd(it.channel))
+            for n in sorted({it.channel for it in items}):                  # every channel the rows use, each acquired once
+                bus[n] = self.ctx.dev.acquire(n, self, self.ctx.diag_cfg.addr, self.ctx.channel.sim_profile,
+                                              self.ctx.diag_cfg.settings.rx_padding)
+                cfg = self.ctx.dev.cfg_of(n)
+                fd[n] = bool(cfg and cfg.is_fd)
+                brs[n] = bool(cfg and cfg.is_fd and cfg.fd_accel)
         except (ConnError, ValueError) as e:
+            self.ctx.dev.release(self)
             warn(self, str(e))
             return
-        cfg = self.ctx.dev.cfg_of(n)
-        fd = bool(cfg and cfg.is_fd)
         self._run_rows = rows
         for r in rows:
             self._set_status(r, "")
@@ -333,7 +347,7 @@ class SendTab(W.QWidget):
         sig = self.sig
 
         def job() -> SendResult:
-            return run_send(bus, items, mode=mode, speed=speed, stop_on_fail=stop, fd=fd, brs=fd and cfg.fd_accel, cancel=self.cancel,
+            return run_send(bus, items, mode=mode, speed=speed, stop_on_fail=stop, fd=fd, brs=brs, cancel=self.cancel,
                             on_status=lambda i, s: sig.changed.emit(i, s))
 
         w = Worker(job, self)

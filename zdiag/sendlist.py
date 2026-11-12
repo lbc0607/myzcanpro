@@ -40,6 +40,7 @@ class SendItem:
     data_inc: bool = False
     name: str = ""
     checked: bool = True
+    channel: int = -1              # channel the row is sent on (-1 = not set: the caller's default channel)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -111,8 +112,9 @@ class Event:
     frames: List[CanFrame] = field(default_factory=list)
 
 
-def _row_events(row: int, it: SendItem, base: float, step: float, fd: bool, brs: bool):
+def _row_events(row: int, it: SendItem, base: float, step: float, fd, brs):
     """Lazy events of one row (memory stays O(1) however large `count` is; count == -1 never ends)."""
+    fd, brs = bool(_per(fd, it)), bool(_per(brs, it))
     rounds = itertools.count() if it.forever else range(it.count)
     for r in rounds:
         yield Event(base + r * step, row, r, [frame_at(it, r * it.per_send + k, fd, brs) for k in range(it.per_send)])
@@ -160,13 +162,22 @@ class SendResult:
         return not self.failed and not self.cancelled
 
 
+def _per(v, it: SendItem, default=False):
+    """`v` is one value for every row or a {channel: value} dict."""
+    return v.get(it.channel, default) if isinstance(v, dict) else v
+
+
 def run_send(bus, items: List[SendItem], mode: str = PARALLEL, speed: float = 1.0, stop_on_fail: bool = True,
              fd: bool = False, brs: bool = False, cancel=None,
              on_status: Optional[Callable[[int, str], None]] = None,
              clock: Callable[[], float] = time.perf_counter,
              sleep: Callable[[float], None] = time.sleep) -> SendResult:
+    """`bus`, `fd` and `brs` may each be a {channel: ...} dict: every row then goes out on the bus of its own `channel`
+    (rows are still scheduled on one common timeline)."""
     for it in items:
-        it.validate(fd)
+        it.validate(bool(_per(fd, it)))
+        if isinstance(bus, dict) and it.channel not in bus:
+            raise ValueError(f"行「{it.name or f'0x{it.can_id:X}'}」的通道 {it.channel} 没有可用的总线")
     events = iter_schedule(items, mode, speed, fd, brs)
     res = SendResult(per_row={i: [0, 0] for i in range(len(items))})
     remaining = {i: it.count for i, it in enumerate(items)}          # -1 never reaches 0
@@ -189,7 +200,7 @@ def run_send(bus, items: List[SendItem], mode: str = PARALLEL, speed: float = 1.
             status(ev.row, "发送中")
         for fr in ev.frames:
             try:
-                bus.send(fr)
+                (bus[items[ev.row].channel] if isinstance(bus, dict) else bus).send(fr)
                 res.sent += 1
                 res.per_row[ev.row][0] += 1
             except Exception:

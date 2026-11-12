@@ -76,15 +76,15 @@ class SendTests(Base):
         t = self.t
         self.assertEqual(t.c_ch.count(), 1); self.assertEqual(t.c_len.count(), 9)
         self.fill(name="进入扩展会话"); t.b_add.click()
-        self.assertEqual(t.table.cell_texts(0)[2:], ["7E2", "CAN", "8", "进入扩展会话", "02 10 01 00 00 00 00 00", "标准数据帧", "1", "1", "0"])
-        c = t.table.item(0, 2); c.setText("7df"); self.assertEqual(t.items[0].can_id, 0x7DF)
-        W.QMessageBox.calls.clear(); t.table.item(0, 9).setText("0")                          # invalid -> reverted
-        self.assertTrue(msgs("warn")); self.assertEqual(t.items[0].count, 1); self.assertEqual(t.table.item(0, 9).text(), "1")
-        t.table.item(0, 9).setText("-1"); self.assertEqual(t.items[0].count, -1)               # forever
-        W.QMessageBox.calls.clear(); t.table.item(0, 9).setText("9000000000"); self.assertTrue(msgs("warn")); self.assertEqual(t.items[0].count, -1)
-        t.table.item(0, 9).setText("9000000"); self.assertEqual(t.items[0].count, 9000000)    # big but legal, no crash
-        t.table.item(0, 9).setText("1")
-        t.table.item(0, 6).setText("01 02 03"); self.assertEqual(t.items[0].data, bytes([1, 2, 3]))
+        self.assertEqual(t.table.cell_texts(0)[2:], ["0", "7E2", "CAN", "8", "进入扩展会话", "02 10 01 00 00 00 00 00", "标准数据帧", "1", "1", "0"])
+        c = t.table.item(0, 3); c.setText("7df"); self.assertEqual(t.items[0].can_id, 0x7DF)
+        W.QMessageBox.calls.clear(); t.table.item(0, 10).setText("0")                          # invalid -> reverted
+        self.assertTrue(msgs("warn")); self.assertEqual(t.items[0].count, 1); self.assertEqual(t.table.item(0, 10).text(), "1")
+        t.table.item(0, 10).setText("-1"); self.assertEqual(t.items[0].count, -1)               # forever
+        W.QMessageBox.calls.clear(); t.table.item(0, 10).setText("9000000000"); self.assertTrue(msgs("warn")); self.assertEqual(t.items[0].count, -1)
+        t.table.item(0, 10).setText("9000000"); self.assertEqual(t.items[0].count, 9000000)    # big but legal, no crash
+        t.table.item(0, 10).setText("1")
+        t.table.item(0, 7).setText("01 02 03"); self.assertEqual(t.items[0].data, bytes([1, 2, 3]))
         self.fill(length="2", data="01 02 03"); W.QMessageBox.calls.clear(); t.b_add.click()
         self.assertTrue(msgs("warn")); self.assertEqual(len(t.items), 1)                      # data longer than length
 
@@ -127,7 +127,7 @@ class SendTests(Base):
         t = self.t
         self.fill(id_="18daf110", data="01 02", length="4", ext=True, count="3", itv="20", name="x", datainc=True); t.b_add.click()
         self.fill(id_="123", length="3", remote=True); t.b_add.click()
-        self.assertEqual(t.table.cell_texts(1)[7], "标准远程帧")
+        self.assertEqual(t.table.cell_texts(1)[8], "标准远程帧")
         t.table.selectRow(0)
         self.assertEqual((t.e_id.text(), t.c_type.currentIndex(), t.e_count.text(), t.k_datainc.isChecked()), ("18daf110", 1, "3", True))
         path = os.path.join(self.ctx.dir, "send.json"); W.QFileDialog.next_path = path; t.b_exp.click()
@@ -140,12 +140,39 @@ class SendTests(Base):
         self.fill(id_="123", length="3", remote=True); self.t.b_now.click()
         f = self._log()[0]; self.assertTrue(f.rtr); self.assertEqual((f.can_id, len(f.data)), (0x123, 3))
 
+    def test_rows_carry_their_channel_and_go_out_on_it(self):
+        self.ctx.dev.start_channel(1, ChannelCfg(), self.ctx.diag_cfg.addr)
+        t = self.t
+        self.fill(id_="100", count="2"); t.b_add.click()                                       # channel 0 selected -> row channel 0
+        t.c_ch.setCurrentIndex(1); self.fill(id_="200", count="3"); t.b_add.click()              # channel 1 selected -> row channel 1
+        self.assertEqual([it.channel for it in t.items], [0, 1])
+        self.assertEqual([t.table.cell_texts(r)[2] for r in range(2)], ["0", "1"])
+        t.table.item(0, 2).setText("1")                                                         # a row's channel can be changed
+        self.assertEqual(t.items[0].channel, 1)
+        W.QMessageBox.calls.clear(); t.table.item(0, 2).setText("5")                            # not started -> refused, reverted
+        self.assertTrue(msgs("warn")); self.assertEqual(t.items[0].channel, 1)
+        t.table.item(0, 2).setText("0")
+        t.b_list.click()
+        for _ in range(100):
+            if not t.running(): break
+            time.sleep(0.05)
+        l0 = [f.can_id for f in self.ctx.dev.chans[0].bus._bus.log]
+        l1 = [f.can_id for f in self.ctx.dev.chans[1].bus._bus.log]
+        self.assertEqual(l0, [0x100] * 2); self.assertEqual(l1, [0x200] * 3)
+        self.assertEqual(self.ctx.dev.owners, {})
+        t.items[1].channel = -1                                                                 # an old list without channel -> current one
+        t.c_ch.setCurrentIndex(0); t.b_list.click()
+        for _ in range(100):
+            if not t.running(): break
+            time.sleep(0.05)
+        self.assertEqual(len(self.ctx.dev.chans[0].bus._bus.log), 2 + 2 + 3)
+
     def test_fd_channel_lengths_no_remote_and_brs(self):
         self.ctx.dev.start_channel(1, ChannelCfg(protocol="CAN FD", data_kbps=2000), self.ctx.diag_cfg.addr)
         t = self.t; t.c_ch.setCurrentIndex(1)
         self.assertEqual(t.c_len.count(), 16); self.assertFalse(t.c_fmt.isEnabled())
         self.fill(length="20", data="01"); t.b_add.click()
-        self.assertEqual(t.table.cell_texts(0)[3:5], ["CAN FD", "20"])
+        self.assertEqual(t.table.cell_texts(0)[4:6], ["CAN FD", "20"])
         t.b_now.click()
         f = self.ctx.dev.chans[1].bus._bus.log[0]; self.assertTrue(f.fd and f.brs); self.assertEqual(len(f.data), 20)
         t.c_len.setCurrentText("9"); t.b_add.click(); self.assertEqual(len(t.items), 1)         # 9 is not a legal FD length

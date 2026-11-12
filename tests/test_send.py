@@ -160,3 +160,20 @@ class FileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PerChannelBuses(unittest.TestCase):
+    def test_dict_of_buses_routes_each_row(self):
+        from zdiag.bus import VirtualBus
+        from zdiag.sendlist import SendItem, run_send
+        a, b = VirtualBus.pair()[0], VirtualBus.pair()[0]
+        items = [SendItem(can_id=0x100, data=b"\x01", length=1, channel=0), SendItem(can_id=0x200, data=b"\x02", length=1, channel=1, count=2)]
+        res = run_send({0: a, 1: b}, items, fd={0: False, 1: False}, sleep=lambda s: None)
+        self.assertTrue(res.ok); self.assertEqual(res.sent, 3)
+        with self.assertRaises(ValueError):
+            run_send({0: a}, items)                                      # row on channel 1 has no bus
+
+    def test_channel_is_saved_in_lists(self):
+        from zdiag.sendlist import SendItem
+        self.assertEqual(SendItem.from_dict(SendItem(channel=2).to_dict()).channel, 2)
+        self.assertEqual(SendItem.from_dict({"can_id": "7E2"}).channel, -1)    # old files
