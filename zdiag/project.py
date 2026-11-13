@@ -122,6 +122,7 @@ class SecurityCfg:
     """Security-access settings.  ONE object per program (AppContext.security), shared by every window and
     persisted in the program config - never part of a flash plan or a per-window copy."""
     key_dll: str = ""               # the key (seed->key) DLL used by every 解锁 step; relative -> program folder
+    level: int = 1                  # security level (odd requestSeed sub-function) used by every 解锁 step
     serial_did: str = "F1 8C"       # DID read (22) for the ECU serial number written to the file's line 1
     serial_file: str = "EcuSerialNum.txt"
     serial_dir: str = ""            # folder of that file (= working folder of the key DLL); "" -> program folder
@@ -136,6 +137,10 @@ class SecurityCfg:
         c = SecurityCfg()
         d = d or {}
         _fill(c, {k: v for k, v in d.items() if k != "id_map"})
+        try:
+            c.level = int(c.level)
+        except (TypeError, ValueError):
+            c.level = 1
         if isinstance(d.get("id_map"), dict):
             c.id_map = {str(k).lower(): [int(x) for x in v] for k, v in d["id_map"].items()}
         return c
@@ -203,6 +208,8 @@ STEP_TYPES = ("service", "delay", "unlock", "driver", "download", "routine")
 _STEP_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "service": {"name": "", "addr": "phys", "pdu": "", "suppress": False, "check": True, "expect": ""},
     "delay": {"name": "延时", "ms": 1000},
+    # level / dll are NOT used: an unlock step always takes level and key DLL from 设置 → 安全访问 (read at run time).  They only
+    # count when "own": true is set (an explicit per-call override, e.g. MCP security_unlock with dll=...).
     "unlock": {"name": "ECU解锁", "level": 1, "dll": ""},
     "driver": {"name": "Flash driver", "file": "", "base_addr": "0", "addr_len": 4, "size_len": 4, "dfi": "00"},
     "download": {"name": "文件下载", "file": "", "base_addr": "0", "addr_len": 4, "size_len": 4, "dfi": "00"},
@@ -240,7 +247,9 @@ def step_summary(s: dict) -> str:
         return f"{s['ms']} ms"
     if t == "unlock":
         import os
-        return f"级别:{s['level']} DLL:{os.path.basename(s['dll']) if s.get('dll') else '(全局设置)'}"
+        if s.get("own"):
+            return f"级别:{s['level']} DLL:{os.path.basename(s['dll']) if s.get('dll') else '(全局设置)'}"
+        return "级别、DLL: 全局设置"
     if t in ("driver", "download"):
         import os
         return f"文件名:{os.path.basename(s['file']) if s['file'] else ''}"
@@ -317,12 +326,18 @@ def sample_project(product: str = "new") -> Project:
 
 def read_global_key_dll(app_dir: str) -> str:
     """The key DLL configured under 设置 → 安全访问 (read straight from the program config; "" when none)."""
+    sec = read_global_security(app_dir)
+    return sec.key_path(app_dir) if sec is not None else ""
+
+
+def read_global_security(app_dir: str) -> "Optional[SecurityCfg]":
+    """The whole 安全访问 setting as saved in the program config (None when there is no config yet)."""
     import json
     for name in ("CanVDS_config.json", "myzcanpro_config.json"):
         try:
             with open(os.path.join(app_dir, name), "r", encoding="utf-8") as f:
                 d = json.load(f)
-            return SecurityCfg.from_dict(d.get("security") or {}).key_path(app_dir)
+            return SecurityCfg.from_dict(d.get("security") or {})
         except (OSError, ValueError, AttributeError):
             continue
-    return ""
+    return None

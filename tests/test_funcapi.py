@@ -56,7 +56,7 @@ class Functions(Base):
 
     def test_validation(self):
         for steps in ([], "x", [{"type": "nope"}], [{"name": "no type"}], [{"type": "service", "pdu": ""}], [{"type": "service", "pdu": "zz"}],
-                      [{"type": "delay", "ms": -5}], [{"type": "unlock", "level": 2, "dll": "builtin:xor"}]):
+                      [{"type": "delay", "ms": -5}], [{"type": "unlock", "level": 2, "dll": "builtin:xor", "own": True}]):
             r = self.save("t", steps); self.assertFalse(r["saved"], steps); self.assertTrue(r["problems"])
         incomplete = [{"type": "unlock", "level": 1, "dll": ""}, {"type": "download", "file": ""}]
         r = self.save("草稿", incomplete); self.assertFalse(r["saved"]); self.assertTrue(any("密钥" in p for p in r["problems"]))
@@ -100,7 +100,7 @@ class Workflow(unittest.TestCase):
         steps = copy.deepcopy(r["draft"]["steps"])
         crc = [s for s in plan.steps if s.get("rkind") == "crc"][0]
         for s in steps:
-            if s["type"] == "unlock": s["dll"] = "builtin:xor"
+            if s["type"] == "unlock": s["dll"], s["own"] = "builtin:xor", True
             if s["type"] == "driver": s["file"] = drv
             if s["type"] == "download": s["file"] = fw
             if s.get("rkind") == "crc":

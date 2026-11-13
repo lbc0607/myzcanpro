@@ -148,6 +148,7 @@ class SettingsDialog(W.QDialog):
         v = W.QVBoxLayout(w)
         g = W.QGridLayout()
         self.e_key, self.b_key = W.QLineEdit(), W.QPushButton("浏览")
+        self.e_level = W.QLineEdit("1")
         self.e_sdid, self.e_sfile, self.c_sfmt = W.QLineEdit(), W.QLineEdit(), W.QComboBox()
         self.e_sdir, self.b_sdir, self.b_spy = W.QLineEdit(), W.QPushButton("浏览"), W.QPushButton("python.exe所在文件夹")
         self.l_sfull = W.QLabel("")
@@ -166,6 +167,10 @@ class SettingsDialog(W.QDialog):
         g.addWidget(W.QLabel("序列号写入格式:"), 4, 0)
         g.addWidget(self.c_sfmt, 4, 1)
         g.addWidget(self.l_sfull, 5, 0, 1, 4)
+        g.addWidget(W.QLabel("安全级别(奇数):"), 6, 0)
+        g.addWidget(self.e_level, 6, 1)
+        g.addWidget(W.QLabel("级别 1 = 27 01 请求种子 / 27 02 发送密钥，3 = 27 03/04……所有「解锁」步骤（包括模块扫描里的功能）每次执行时都取这里的级别和密钥 DLL，改一次即处处生效。"),
+                    7, 0, 1, 4)
         self.e_sdir.textChanged.connect(self._show_sfull)
         self.e_sfile.textChanged.connect(self._show_sfull)
         self.b_sdir.clicked.connect(self._pick_sdir)
@@ -278,6 +283,7 @@ class SettingsDialog(W.QDialog):
         sec = self.ctx.security
         self.e_key.setText(sec.key_dll)
         self.e_sdid.setText(sec.serial_did)
+        self.e_level.setText(str(sec.level))
         self.e_sfile.setText(sec.serial_file)
         self.e_sdir.setText(sec.serial_dir)
         self.c_sfmt.setCurrentIndex(1 if sec.serial_format == "hex" else 0)
@@ -328,6 +334,9 @@ class SettingsDialog(W.QDialog):
         except ValueError:
             raise ValueError("序列号 DID 应为 2 字节十六进制，例如 F1 8C")
         sdid_text = " ".join(f"{b:02X}" for b in sdid)
+        level = int_of(self.e_level, "安全级别", 1, 0x7D)
+        if level % 2 == 0:
+            raise ValueError("安全级别必须是奇数 (27 请求种子的子功能)")
         sdir = self.e_sdir.text().strip()
         sfile = self.e_sfile.text().strip()
         if not sfile or any(ch in sfile for ch in '\\/:*?"<>|'):
@@ -354,6 +363,7 @@ class SettingsDialog(W.QDialog):
         sec = self.ctx.security                                    # program-wide: every window sees it at once
         sec.serial_did, sec.serial_file, sec.serial_dir = sdid_text, sfile, sdir
         sec.key_dll = self.e_key.text().strip()
+        sec.level = level
         sec.serial_format = "hex" if self.c_sfmt.currentIndex() == 1 else "ascii"
         sec.id_map = id_map
         self.ctx.save()

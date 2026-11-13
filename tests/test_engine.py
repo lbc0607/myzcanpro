@@ -14,7 +14,7 @@ def tmpfile(data, name="fw.bin"):
 def make_plan(product, fw_path, drv_path):
     p = sample_project(product)
     for s in p.steps:
-        if s["type"] == "unlock": s["dll"] = "builtin:xor"
+        if s["type"] == "unlock": s["dll"], s["own"] = "builtin:xor", True
         if s["type"] == "driver": s["file"] = drv_path
         if s["type"] == "download": s["file"] = fw_path
     return p
@@ -71,7 +71,7 @@ class ProductFlows(unittest.TestCase):
     def test_unlock_needs_odd_level(self):
         def mut(plan):
             for s in plan.steps:
-                if s["type"] == "unlock": s["level"] = 2
+                if s["type"] == "unlock": s["level"], s["own"] = 2, True
         ok, ecu, steps, *_ = run("new", mut)
         self.assertFalse(ok); self.assertEqual(steps[4][0], "fail")
 
@@ -354,7 +354,7 @@ class Preflight(unittest.TestCase):
                  new_step("routine", rid="DF", use_crc=True), new_step("driver", file=ok_file)]
         probs = preflight(steps)
         self.assertEqual(len(probs), 5, probs)
-        good = [new_step("service", pdu="10 03"), new_step("unlock", dll="builtin:xor"),
+        good = [new_step("service", pdu="10 03"), new_step("unlock", dll="builtin:xor", own=True),
                 new_step("download", file=ok_file), new_step("routine", rid="DF FE", use_crc=True)]
         self.assertEqual(preflight(good), [])
         self.assertEqual(len(preflight([new_step("routine", rid="DF FE", use_crc=True)])), 1)
@@ -375,15 +375,37 @@ class GlobalKeyDll(unittest.TestCase):
         self.assertEqual(s.run_step(new_step("unlock", level=1)), "已解锁")
         self.assertEqual(new_step("unlock")["dll"], "")                       # steps do not carry a path any more
 
-    def test_missing_global_dll_has_clear_message_and_step_dll_still_overrides(self):
+    def test_missing_global_dll_has_clear_message_and_explicit_override_works(self):
         s = self.sess("")
         with self.assertRaises(StepError) as cm: s.run_step(new_step("unlock", level=1))
         self.assertIn("更多设置 → 安全访问", str(cm.exception))
         s.run_step(new_step("service", pdu="10 03"))
-        self.assertEqual(s.run_step(new_step("unlock", level=1, dll="builtin:xor")), "已解锁")     # old plans keep working
+        self.assertEqual(s.run_step(new_step("unlock", level=1, dll="builtin:xor", own=True)), "已解锁")     # explicit per-call override
         s2 = self.sess("/no/such/key.dll")
         with self.assertRaises(StepError) as cm: s2.run_step(new_step("unlock", level=1))
         self.assertIn("不存在", str(cm.exception))
+
+    def test_level_and_dll_follow_the_global_setting_at_run_time(self):
+        """Steps saved with any level / dll are NOT edited: the global setting is read each time the step runs."""
+        from zdiag.project import SecurityCfg
+        sec = SecurityCfg(); sec.key_dll = "builtin:xor"; sec.level = 1
+        cfg = DiagConfig(); cfg.settings.p2_ms = 1500
+        bus, ecu = make_sim(cfg.addr, "new")
+        s = DiagSession(bus, cfg, Hooks(), security=sec)
+        self.addCleanup(lambda: (s.close(), ecu.stop()))
+        s.run_step(new_step("service", pdu="10 03"))
+        stale = new_step("unlock", level=5, dll="/old/stale.dll")                  # an old plan that pinned other values
+        self.assertEqual(s.run_step(stale), "已解锁")                              # ... still unlocks with global level 1 + xor
+        ecu.unlocked = False
+        sec.level = 2                                                              # a change in 设置 is seen by the very next run
+        with self.assertRaises(StepError) as cm: s.run_step(stale)
+        self.assertIn("奇数", str(cm.exception))
+        sec.level = 1
+        self.assertEqual(s.run_step(stale), "已解锁")
+        from zdiag.engine import preflight
+        sec.level = 4
+        self.assertEqual(len(preflight([stale], key_dll="builtin:xor", key_level=sec.level)), 1)
+        self.assertEqual(preflight([stale], key_dll="builtin:xor", key_level=1), [])
 
     def test_preflight_and_summary(self):
         from zdiag.engine import preflight

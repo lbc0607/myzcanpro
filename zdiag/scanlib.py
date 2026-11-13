@@ -201,7 +201,7 @@ def run_executor(session: DiagSession, ex: Executor) -> Outcome:
     steps = copy.deepcopy(ex.steps)
     if not steps:
         return Outcome(False, error="执行器里没有步骤")
-    problems = preflight(steps, session.base_dir, session.security.key_path(session.app_dir))
+    problems = preflight(steps, session.base_dir, session.security.key_path(session.app_dir), session.security.level)
     if problems:
         return Outcome(False, error="; ".join(problems))
     ok = session.run_plan(steps)

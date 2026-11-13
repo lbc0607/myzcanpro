@@ -191,7 +191,7 @@ def record_sim_flash(extra_cleanup=None):
             with open(pth, "wb") as f: f.write(os.urandom(n))
         plan = sample_project("new")
         for st in plan.steps:
-            if st["type"] == "unlock": st["dll"] = "builtin:xor"
+            if st["type"] == "unlock": st["dll"], st["own"] = "builtin:xor", True
             if st["type"] == "driver": st["file"] = drv
             if st["type"] == "download": st["file"] = fw
         ctx.diag_cfg.settings.p2_ms = 1500
@@ -227,7 +227,7 @@ class RoundTrip(unittest.TestCase):
         steps = copy.deepcopy(dr["steps"])
         crc = [s for s in plan.steps if s.get("rkind") == "crc"][0]
         for s in steps:
-            if s["type"] == "unlock": s["dll"] = "builtin:xor"
+            if s["type"] == "unlock": s["dll"], s["own"] = "builtin:xor", True
             if s["type"] == "driver": s["file"] = drv
             if s["type"] == "download": s["file"] = fw
             if s.get("rkind") == "crc":

@@ -353,12 +353,13 @@ class Ops:
             raise OpsError("会话类型应为 1 字节: 01 默认 / 02 编程 / 03 扩展")
         return self.uds_request(channel, "10 " + fmt_hex(s), module=module, **kw)
 
-    def security_unlock(self, channel: int, dll: str = "", level: int = 1, module: str = "", **kw) -> Dict[str, Any]:
-        """27 seed / key unlock. The key DLL is the global one (设置 → 安全访问 / settings_set security.key_dll);
-        `dll` (path, or 'builtin:xor' for the demo algorithm) overrides it for this call only."""
+    def security_unlock(self, channel: int, dll: str = "", level: int = 0, module: str = "", **kw) -> Dict[str, Any]:
+        """27 seed / key unlock. Level and key DLL are the global ones (设置 → 安全访问 / settings_set security.level, security.key_dll);
+        `level` (non-zero) / `dll` (path, or 'builtin:xor' for the demo algorithm) override them for this call only."""
         if not dll and not self.ctx.security.key_dll.strip():
             raise OpsError("还没有配置密钥 DLL：先 settings_set(section='security', values={'key_dll': '路径'})，或本次传 dll；演示算法用 builtin:xor")
-        lvl = _int(level, "安全级别", 1, 0x7D)
+        own = bool(dll) or bool(level)
+        lvl = _int(level or self.ctx.security.level, "安全级别", 1, 0x7D)
         if lvl % 2 == 0:
             raise OpsError("安全级别应为奇数 (27 请求种子的子功能)")
         cfg = self._cfg(module, **{k: v for k, v in kw.items() if k in ("phys", "resp", "func", "extended")})
@@ -367,7 +368,7 @@ class Ops:
         try:
             from .engine import StepError
             try:
-                detail = sess.run_step(new_step("unlock", level=lvl, dll=dll or ""))
+                detail = sess.run_step(new_step("unlock", level=lvl, dll=dll or "", own=own))
                 return {"ok": True, "message": detail, "log": self._log_lines(log)}
             except StepError as e:
                 return {"ok": False, "error": str(e), "log": self._log_lines(log)}
@@ -462,7 +463,7 @@ class Ops:
             raise OpsError(f"模块「{module}」里没有功能「{path}」，可用: {', '.join(function_paths(self.store, module))}")
         ex = Executor.load(p)
         from .engine import preflight
-        problems = preflight(list(ex.steps), self.ctx.dir, self.ctx.security.key_path(self.ctx.dir))
+        problems = preflight(list(ex.steps), self.ctx.dir, self.ctx.security.key_path(self.ctx.dir), self.ctx.security.level)
         if problems:
             return {"started": False, "message": "功能还不完整，未执行", "problems": problems}
         log: List[LogEvent] = []

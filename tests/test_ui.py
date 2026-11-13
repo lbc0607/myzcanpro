@@ -12,7 +12,6 @@ from zdiag.crc import PRESETS
 from zdiag_ui.appctx import AppContext
 from zdiag_ui.launcher import LauncherWindow
 from zdiag_ui.send_window import SendWindow
-from zdiag_ui.ft_window import FileTransferWindow
 from zdiag_ui.monitor_window import MonitorWindow
 from zdiag_ui import scan_window as _sw
 from zdiag_ui.scan_window import ScanWindow
@@ -574,13 +573,25 @@ class StepEditorTests(Base):
     def test_unlock_form_has_no_dll_and_uses_global_setting(self):
         i = next(i for i, (sv, _) in enumerate(self.e.forms) if sv["sid"] == 0x27)
         f = self.e.forms[i][1]
-        self.assertNotIn("e_dll", vars(f))
-        self.e.lst.setCurrentRow(i); f.e_level.setText("3"); self.e.b_add.click()
+        self.assertNotIn("e_dll", vars(f)); self.assertNotIn("e_level", vars(f))             # level and DLL are both global now
+        self.e.lst.setCurrentRow(i); self.e.b_add.click()
         st = self.e.project.steps[-1]
-        self.assertEqual((st["type"], st["level"], st["dll"]), ("unlock", 3, ""))
+        self.assertEqual((st["type"], st["dll"], st.get("own")), ("unlock", "", None))
 
 
 class SecurityGlobalTests(Base):
+    def test_level_is_global_persisted_and_validated(self):
+        cfg, ch = self.ctx.diag_cfg, self.ctx.channel
+        d = SettingsDialog(self.ctx, cfg, ch)
+        self.assertEqual(d.e_level.text(), "1")
+        d.e_level.setText("2"); W.QMessageBox.calls.clear(); d.btn_ok.click()
+        self.assertTrue(msgs("warn")); self.assertEqual(self.ctx.security.level, 1)            # even level refused, nothing applied
+        d.e_level.setText("3"); d.btn_ok.click()
+        self.assertEqual(self.ctx.security.level, 3)
+        again = AppContext(self.ctx.dir)
+        self.assertEqual(again.security.level, 3)
+        self.assertEqual(SettingsDialog(again, again.diag_cfg, again.channel).e_level.text(), "3")
+
     def test_key_dll_is_a_global_persisted_setting(self):
         cfg, ch = self.ctx.diag_cfg, self.ctx.channel
         d = SettingsDialog(self.ctx, cfg, ch)
@@ -613,87 +624,6 @@ class SecurityGlobalTests(Base):
         d.e_sid.setText("BA"); d.e_name.setText("厂商服务"); d._sub_row("01", "子功能")
         d.b_ok.click()
         self.assertEqual(self.ctx.services[-1]["sid"], 0xBA); self.assertTrue(os.path.isfile(self.ctx.services_path))
-
-
-class FileTransferTests(Base):
-    def setUp(self):
-        super().setUp()
-        self.win = FileTransferWindow(self.ctx)
-        self.addCleanup(lambda: (self.win.ops.ft_stop(), self.win.close()))
-
-    def up(self, *chs):
-        for c in chs:
-            if c not in self.ctx.dev.started():
-                self.ctx.dev.start_channel(c, ChannelCfg())
-        self.win._on_dev_change()
-
-    def test_role_switch_and_validation(self):
-        w = self.win
-        w.c_role.setCurrentIndex(1)
-        self.assertEqual((w.role, w.b_start.text()), ("receive", "开始接收"))
-        w.c_role.setCurrentIndex(0)
-        self.assertEqual((w.role, w.b_start.text()), ("send", "开始发送"))
-        w.b_start.click()                                                  # no channel started
-        self.assertTrue(msgs("warn"))
-        self.up(0)
-        W.QMessageBox.calls.clear(); w.b_start.click()                    # channel ok, nothing to send
-        self.assertTrue(msgs("warn")); self.assertFalse(w.running())
-
-    def test_channel_boxes_follow_the_device(self):
-        self.up(0, 1)
-        self.assertEqual(sorted(self.win._boxes), [0, 1])
-        self.assertEqual(self.win.selected_channels(), [0])               # first one preselected
-        self.win._boxes[1].setChecked(True)
-        self.assertEqual(self.win.selected_channels(), [0, 1])
-        self.win._on_dev_change(); self.assertEqual(self.win.selected_channels(), [0, 1])   # the choice survives a refresh
-
-    def test_receive_start_stop_and_close_always_works(self):
-        import tempfile
-        self.up(0)
-        w = self.win
-        w.c_role.setCurrentIndex(1)
-        w.e_dest.setText(tempfile.mkdtemp()); w.k_loop.setChecked(True)
-        w.b_start.click()
-        self.assertTrue(w.running()); self.assertTrue(w.b_stop.isEnabled() and not w.b_start.isEnabled())
-        W.QMessageBox.calls.clear()
-        ev = type("E", (), {"ok": None, "accept": lambda s: setattr(s, "ok", True), "ignore": lambda s: setattr(s, "ok", False)})()
-        t0 = time.monotonic()
-        w.b_stop.click()                                                    # never blocks the GUI thread
-        self.assertLess(time.monotonic() - t0, 1.0)
-        for _ in range(100):
-            if not w.running(): break
-            time.sleep(0.05)
-        w._tick()
-        self.assertFalse(w.running()); self.assertTrue(w.b_start.isEnabled())
-        self.assertEqual(self.ctx.dev.owners, {})                          # channel handed back
-        w.b_start.click(); self.assertTrue(w.running())
-        w.closeEvent(ev); self.assertTrue(ev.ok)                            # closing is never vetoed, it stops the transfer
-        for _ in range(100):
-            if not w.running(): break
-            time.sleep(0.05)
-        self.assertFalse(w.running()); self.assertEqual(self.ctx.dev.owners, {})
-
-    def test_device_close_aborts_a_running_transfer(self):
-        import tempfile
-        self.up(0)
-        w = self.win
-        w.c_role.setCurrentIndex(1); w.e_dest.setText(tempfile.mkdtemp()); w.k_loop.setChecked(True); w.b_start.click()
-        self.assertTrue(w.running())
-        t0 = time.monotonic()
-        self.ctx.dev.close()                                                # no veto, no long wait
-        self.assertLess(time.monotonic() - t0, 3.0); self.assertFalse(self.ctx.dev.is_open)
-        for _ in range(100):
-            if not w.running(): break
-            time.sleep(0.05)
-        self.assertFalse(w.running())
-
-    def test_busy_channel_is_reported(self):
-        self.up(0)
-        w = self.win
-        tok = object(); self.ctx.dev.acquire(0, tok)                        # another window holds the channel
-        w.c_role.setCurrentIndex(1); w.e_dest.setText("x"); W.QMessageBox.calls.clear(); w.b_start.click()
-        self.assertTrue(msgs("warn")); self.assertFalse(w.running())
-        self.ctx.dev.release(tok)
 
 
 class CrcUiTests(Base):

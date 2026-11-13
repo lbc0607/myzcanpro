@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 from . import flashgen, tracefile
 from .engine import preflight
 from .paths import home_dir, scan_dir
-from .project import STEP_TYPES, fmt_hex, normalize_step, parse_id, read_global_key_dll
+from .project import STEP_TYPES, fmt_hex, normalize_step, parse_id, read_global_security
 from .scanlib import (FUNC_ADDR, INFO_FIELDS, Executor, Module, ScanError, ScanStore, check_name, default_info_executor,
                       function_paths)
 
@@ -64,7 +64,8 @@ def check_steps(steps: Any, result: Optional[dict], home: Optional[str] = None) 
         except (ValueError, TypeError) as e:
             problems.append(f"步骤{i}: {e}")
     if len(norm) == len(steps):
-        problems += preflight(norm, home_dir(home), read_global_key_dll(home_dir(home)))
+        sec = read_global_security(home_dir(home))
+        problems += preflight(norm, home_dir(home), sec.key_path(home_dir(home)) if sec else "", sec.level if sec else None)
     res = {"step": -1, "skip": -1, "parse": "hex"}
     if result is not None:
         if not isinstance(result, dict) or set(result) - set(RESULT_KEYS):
@@ -212,7 +213,7 @@ CanVDS「功能」(执行器) = 某个软件模块下的一串步骤，和「ECU
 步骤 = {"type": ..., "name": 显示名, ...字段}，未写的字段用默认值。类型:
 - service: pdu(十六进制 "10 03"), addr("phys"|"func"), suppress(true=不期望响应), check(true=校验响应), expect(期望响应模式，空=肯定响应)
 - delay: ms
-- unlock: level(奇数，如 1)；密钥 DLL 是全局设置（settings_set security.key_dll，配置一次永久有效），一般不写 dll；dll 字段只用于单步覆盖（"builtin:xor"=演示算法）
+- unlock: 不用写 level 和 dll——安全级别（security.level，奇数，默认 1）和密钥 DLL（security.key_dll）都是全局设置（settings_set，配置一次永久有效），每次执行时现取最新值，已有功能不用逐个改；"builtin:xor"=演示算法
 - driver: file(Flash driver 文件 hex/s19/bin 路径), base_addr(十六进制，bin才用), addr_len(4), size_len(4), dfi("00")
 - download: 同 driver，下载应用程序；多段 hex/s19 的各段地址以文件为准
 - routine(31例程):

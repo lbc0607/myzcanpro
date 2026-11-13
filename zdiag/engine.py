@@ -294,7 +294,7 @@ class DiagSession:
 
     def _key_fn(self, s: dict):
         st = self.security                                         # read at call time: always the latest settings
-        dll = (s.get("dll") or "").strip()                         # a step-level DLL still wins (old plans); normally empty
+        dll = (s.get("dll") or "").strip() if s.get("own") else ""   # only an explicit per-call override; plans never pin a DLL
         path = (dll if dll.startswith("builtin:") else self.resolve(dll)) if dll else st.key_path(self.app_dir)
         if not path:
             raise StepError("未配置密钥 DLL：请在 更多设置 → 安全访问 里选择（全局设置，保存后一直有效）")
@@ -311,9 +311,9 @@ class DiagSession:
                               serial_format=st.serial_format, state=self.serial_state, file_name=st.serial_file)
 
     def _step_unlock(self, s: dict) -> str:
-        level = int(s["level"])
-        if level % 2 == 0:
-            raise StepError("安全级别必须是奇数 (27 请求种子的子功能)")
+        level = int(s["level"]) if s.get("own") else int(self.security.level)      # global setting, read now: always the latest
+        if level % 2 == 0 or not 1 <= level <= 0x7D:
+            raise StepError(f"安全级别必须是奇数 (27 请求种子的子功能)，当前 {level}（更多设置 → 安全访问）")
         fresh = self.uds.security_access(self._key_fn(s), level)
         return "已解锁" if fresh else "已处于解锁状态(seed 全 0)"
 
@@ -560,7 +560,7 @@ def _abs(base_dir: str, p: str) -> str:
     return p if os.path.isabs(p) else os.path.join(base_dir, p)
 
 
-def preflight(steps: List[dict], base_dir: str = ".", key_dll: str = "") -> List[str]:
+def preflight(steps: List[dict], base_dir: str = ".", key_dll: str = "", key_level: Optional[int] = None) -> List[str]:
     """Static checks before touching the ECU. Returns human-readable problems (empty = ok)."""
     out: List[str] = []
     seen_download = False
@@ -575,9 +575,11 @@ def preflight(steps: List[dict], base_dir: str = ".", key_dll: str = "") -> List
                 if int(s.get("ms", 0)) < 0:
                     out.append(f"{tag}: 延时无效")
             elif t == "unlock":
-                if int(s.get("level", 1)) % 2 == 0:
-                    out.append(f"{tag}: 安全级别必须是奇数")
-                dll = (s.get("dll") or "").strip() or (key_dll or "").strip()          # step-level (old plans) or the global one
+                own = bool(s.get("own"))
+                lvl = int(s.get("level", 1)) if own or key_level is None else int(key_level)
+                if lvl % 2 == 0:
+                    out.append(f"{tag}: 安全级别必须是奇数" + ("" if own else "（更多设置 → 安全访问）"))
+                dll = ((s.get("dll") or "").strip() if own else "") or (key_dll or "").strip()     # the global one unless overridden per call
                 if not dll:
                     out.append(f"{tag}: 未配置密钥 DLL（更多设置 → 安全访问）")
                 elif not dll.startswith("builtin:") and not os.path.isfile(_abs(base_dir, dll)):

@@ -340,9 +340,9 @@ async def session_control(channel: int, session: str = "03", module: str = "") -
 
 
 @mcp.tool()
-async def security_unlock(channel: int, level: int = 1, module: str = "", dll: str = "") -> Dict[str, Any]:
-    """Security access (27 seed/key). Uses the global key DLL (set once with set_settings section='security' values={'key_dll': path});
-    `dll` overrides it for this call only ('builtin:xor' = demo algorithm)."""
+async def security_unlock(channel: int, level: int = 0, module: str = "", dll: str = "") -> Dict[str, Any]:
+    """Security access (27 seed/key). Uses the global level and key DLL (set once with set_settings section='security'
+    values={'key_dll': path, 'level': 1}); level (non-zero) / dll override them for this call only ('builtin:xor' = demo algorithm)."""
     return await call("security_unlock", channel=channel, dll=dll or None, level=level, module=module or None)
 
 
