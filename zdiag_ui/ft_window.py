@@ -1,6 +1,7 @@
 """文件传输 window: send / receive files and whole folders over 1~2 CAN / CAN FD channels (zdiag/cft.py via the ops layer)."""
 from typing import Dict, List
 
+from zdiag.devmgr import channel_count
 from zdiag.ops import Ops, OpsError
 from .common import warn
 from .qt import Qt, QtCore, QtWidgets as W
@@ -52,7 +53,7 @@ class FileTransferWindow(W.QWidget):
         gl.addWidget(W.QLabel("块大小(字节):"), 0, 4)
         gl.addWidget(self.e_chunk, 0, 5)
         self.box_row = W.QHBoxLayout()
-        self.l_nochan = W.QLabel("（没有已启动的通道：先在设备管理里启动；选两个通道即双通道传输，一条断线自动改走另一条）")
+        self.l_nochan = W.QLabel("（现在没有已启动的通道：可以先勾选，传输会一直监视所勾选的通道，通道打开/设备重新连接后自动连上并续传；选两个通道即双通道传输，一条断线自动改走另一条）")
         self.box_row.addWidget(W.QLabel("通道(最多 2 个):"))
         gl.addLayout(self.box_row, 1, 0, 1, 6)
         gl.addWidget(self.l_nochan, 2, 0, 1, 6)
@@ -125,8 +126,9 @@ class FileTransferWindow(W.QWidget):
             b.setParent(None)
         self._boxes = {}
         started = self.ctx.dev.started()
-        for n in started:
-            b = W.QCheckBox(f"通道{n} ({self.ctx.dev.cfg_of(n).summary()})")
+        for n in sorted(set(started) | set(range(channel_count(getattr(self.ctx.dev, "name", "") or "")))):
+            c = self.ctx.dev.cfg_of(n)
+            b = W.QCheckBox(f"通道{n} ({c.summary()})" if c else f"通道{n} (未启动)")
             b.setChecked(self._checked.get(n, len(self._boxes) < 1))
             self.box_row.addWidget(b)
             self._boxes[n] = b
@@ -162,7 +164,7 @@ class FileTransferWindow(W.QWidget):
     def _start(self) -> None:
         chans = self.selected_channels()
         if not chans or len(chans) > 2:
-            warn(self, "请选择 1~2 个已启动的通道。")
+            warn(self, "请选择 1~2 个通道。")
             return
         try:
             chunk = int(self.e_chunk.text().strip())
@@ -217,7 +219,7 @@ class FileTransferWindow(W.QWidget):
         if st["failed"]:
             txt += f"\n失败: {', '.join(st['failed'][:5])}"
         self.l_state.setText(txt)
-        self.l_links.setText("    ".join(f"{l['name']}: {'在线' if l['alive'] else '离线'}  {l.get('tx_frames', 0)}帧  错误{l.get('errors', 0)}  总线错误帧{l.get('bus_errors', 0)}"
+        self.l_links.setText("    ".join(f"{l['name']}: {('在线' if l['alive'] else '离线') if l.get('attached', True) else '未打开，等待中'}  {l.get('tx_frames', 0)}帧  错误{l.get('errors', 0)}  总线错误帧{l.get('bus_errors', 0)}"
                                          + (f"  降速{l['backoff_ms']}ms" if l.get('backoff_ms') else "")
                                          for l in st["links"]))
         lines = st["log"]

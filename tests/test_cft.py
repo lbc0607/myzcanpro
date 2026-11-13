@@ -363,3 +363,123 @@ class Integrity(Base):
         snd, rcv, res = self.run_pair([Cable()], [f], c=cfg(retries=0), wait=90)
         self.assertIn("bad.bin", res["s"]["failed"])
         self.assertEqual([x for x in os.listdir(self.dst) if x.endswith((PART, META))], [])   # nothing stale left to poison a resume
+
+
+class Device:
+    """Stands in for one end's device/channel: `up` False = unplugged (the Link must detach), True = the channel is open again."""
+    def __init__(self, bus, up=True):
+        self.bus, self.up = bus, up
+        self.opened = 0
+
+    def provider(self):
+        if not self.up:
+            return None
+        self.opened += 1
+        return self.bus, True, True
+
+    def validator(self, bus):
+        return self.up
+
+    def link(self, idx, c, name):
+        l = Link(idx, None, True, True, c, name)
+        l.provider, l.validator = self.provider, self.validator
+        got = self.provider()
+        if got:
+            l.attach(*got)
+        return l
+
+
+class Reconnect(Base):
+    def pair(self, c, devs_s, devs_r):
+        snd = Sender([d.link(i, c, f"S{i}") for i, d in enumerate(devs_s)], c)
+        rcv = Receiver([d.link(i, c, f"R{i}") for i, d in enumerate(devs_r)], self.dst, c)
+        return snd, rcv
+
+    def go(self, snd, rcv, paths, hook, wait=90):
+        res = {}
+        tr = threading.Thread(target=lambda: res.update(r=rcv.run()), daemon=True); tr.start()
+        ts = threading.Thread(target=lambda: res.update(s=snd.run(paths)), daemon=True); ts.start()
+        hook()
+        ts.join(wait)
+        if ts.is_alive():
+            snd.stop()
+        tr.join(10)
+        if tr.is_alive():
+            rcv.stop(); tr.join(5)
+        return res
+
+    def wait_progress(self, snd, chunks=20, secs=20):
+        end = time.time() + secs
+        while time.time() < end:
+            fs = snd.cur
+            if fs is not None and fs.done_chunks() >= chunks:
+                return True
+            time.sleep(0.005)
+        return False
+
+    def test_channels_opened_after_the_transfer_started(self):
+        cb = Cable()
+        ds, dr = Device(cb.s, up=False), Device(cb.r, up=False)
+        c = cfg(persist=True, watch_ms=50)
+        snd, rcv = self.pair(c, [ds], [dr])
+        f = os.path.join(self.src, "a.bin"); make_file(f, 40_000)
+
+        def hook():
+            time.sleep(0.6)                                                   # nothing open: the sender keeps waiting, no failure
+            self.assertEqual(snd.state, "connecting")
+            ds.up = True; time.sleep(0.3); dr.up = True
+        res = self.go(snd, rcv, [f], hook)
+        self.assertEqual(res["s"]["state"], "done", res["s"]["error"])
+        self.assertTrue(same(f, os.path.join(self.dst, "a.bin")))
+
+    def test_both_devices_unplugged_mid_transfer_and_resume(self):
+        cb = Cable()
+        ds, dr = Device(cb.s), Device(cb.r)
+        c = cfg(persist=True, watch_ms=50, idle_timeout=2.0)                   # a failing run would give up after 2 s
+        snd, rcv = self.pair(c, [ds], [dr])
+        f = os.path.join(self.src, "big.bin"); make_file(f, 3_000_000, seed=3)
+
+        def hook():
+            self.assertTrue(self.wait_progress(snd, 30))
+            ds.up = False                                                     # sender's device pulled
+            time.sleep(0.4)
+            dr.up = False                                                     # then the receiver's
+            time.sleep(3.0)                                                   # longer than idle_timeout: must NOT give up
+            self.assertFalse(snd.stop_ev.is_set())
+            self.assertFalse(snd.links[0].attached); self.assertFalse(rcv.links[0].attached)
+            done_before = snd.cur.done_chunks()
+            dr.up = True; time.sleep(0.4); ds.up = True                       # plugged back in, receiver first
+            self.assertTrue(self.wait_progress(snd, done_before + 50, 30))
+        res = self.go(snd, rcv, [f], hook)
+        self.assertEqual(res["s"]["state"], "done", res["s"]["error"])
+        self.assertTrue(same(f, os.path.join(self.dst, "big.bin")))
+        self.assertGreaterEqual(snd.links[0].attaches, 2)
+        self.assertGreaterEqual(rcv.links[0].attaches, 2)
+        self.assertEqual(sorted(os.listdir(self.dst)), ["big.bin"])
+
+    def test_one_of_two_channels_comes_back(self):
+        cbs = [Cable(1), Cable(2)]
+        ds, dr = [Device(c.s) for c in cbs], [Device(c.r) for c in cbs]
+        c = cfg(persist=True, watch_ms=50)
+        snd, rcv = self.pair(c, ds, dr)
+        f = os.path.join(self.src, "m.bin"); make_file(f, 2_000_000, seed=5)
+
+        def hook():
+            self.assertTrue(self.wait_progress(snd, 20))
+            ds[1].up = False; dr[1].up = False                                 # channel 1 of both devices goes away
+            time.sleep(1.0)
+            self.assertTrue(snd.links[0].alive)                                # the other link carries on
+            ds[1].up = True; dr[1].up = True
+        res = self.go(snd, rcv, [f], hook)
+        self.assertEqual(res["s"]["state"], "done", res["s"]["error"])
+        self.assertTrue(same(f, os.path.join(self.dst, "m.bin")))
+        self.assertGreaterEqual(snd.links[1].attaches, 1)
+
+    def test_without_persist_a_missing_channel_still_fails_fast(self):
+        cb = Cable()
+        c = cfg(idle_timeout=1.0)
+        snd = Sender([Device(cb.s, up=False).link(0, c, "S0")], c)
+        f = os.path.join(self.src, "x.bin"); make_file(f, 1000)
+        t0 = time.time()
+        r = snd.run([f])
+        self.assertEqual(r["state"], "error"); self.assertLess(time.time() - t0, 15)

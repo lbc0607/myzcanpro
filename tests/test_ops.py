@@ -163,9 +163,13 @@ class FileTransferOps(Base):
         self.released = []
 
         def fake(ch):
+            if ch not in self.alive:
+                raise OpsError("通道未启动")
             c = self.cables[ch % 2]
             return (c.s if ch < 2 else c.r), True, True, lambda: self.released.append(ch)
         self.ops._ft_open = fake
+        self.alive = {0, 1, 2, 3}                                                               # channels currently "open"
+        self.ops._ft_valid = lambda ch, bus: ch in self.alive
 
     def wait(self, role, secs=40):
         end = time.time() + secs
@@ -191,6 +195,28 @@ class FileTransferOps(Base):
                 self.assertEqual(a.read(), b.read())
         self.assertEqual(sorted(self.released), [0, 1, 2, 3])                                   # channels handed back
         self.assertEqual(self.ops.ft_status()["active"], [])
+
+    def test_channels_opened_late_and_replugged(self):
+        src = os.path.join(self.ctx.dir, "src_rc"); dst = os.path.join(self.ctx.dir, "dst_rc")
+        os.makedirs(src)
+        with open(os.path.join(src, "a.bin"), "wb") as f: f.write(os.urandom(1_500_000))
+        self.alive = set()                                                                      # nothing open yet
+        r = self.ops.ft_receive([2], dst); self.assertEqual(r["waiting_channels"], [2], r)
+        s = self.ops.ft_send([0], [src]); self.assertEqual(s["waiting_channels"], [0], s)
+        time.sleep(0.8); self.assertTrue(self.ops._ft["send"].running())                      # waiting, not failing
+        self.alive = {0, 2}
+        end = time.time() + 20
+        while time.time() < end and self.ops._ft["send"].engine.cur is None: time.sleep(0.02)
+        while time.time() < end and self.ops._ft["send"].engine.cur.done_chunks() < 20: time.sleep(0.005)
+        self.alive = set()                                                                      # device unplugged mid-transfer
+        self.ops.abort_channel(0)                                                               # (what dev.close() does) must not kill the job
+        time.sleep(1.0); self.assertTrue(self.ops._ft["send"].running())
+        self.assertIn(0, self.released)                                                         # ...but it lets go of the channel
+        self.alive = {0, 2}
+        st = self.wait("send", 60); rv = self.wait("receive", 60)
+        self.assertEqual(st["state"], "done", st["error"]); self.assertEqual(rv["state"], "done")
+        with open(os.path.join(src, "a.bin"), "rb") as a, open(os.path.join(dst, "src_rc", "a.bin"), "rb") as b:
+            self.assertEqual(a.read(), b.read())
 
     def test_argument_errors_and_busy_channel(self):
         with self.assertRaises(OpsError): self.ops.ft_send([0], [])
@@ -226,14 +252,17 @@ class ForcedStop(Base):
         self._running_receive()
         t0 = time.time()
         self.ctx.dev.stop_channel(0)                          # what the 通道关闭 button does: no veto
-        self.assertLess(time.time() - t0, 2.0); self._wait_idle()
-        self.assertEqual(self.ctx.dev.started(), [1]); self.assertEqual(self.ctx.dev.owners, {})
+        self.assertLess(time.time() - t0, 2.0)
+        self.assertEqual(self.ctx.dev.started(), [1]); self.assertEqual(self.ctx.dev.owners, {})   # channel handed back at once
+        self.assertEqual(self.ops.ft_status()["active"], ["receive"])                           # the job keeps watching for it to return
+        self.ops.ft_stop(wait=0); self._wait_idle()
 
     def test_device_close_aborts_everything(self):
         self._running_receive()
         self.ops.keepalive_start(1)
         self.ctx.dev.close()
-        self._wait_idle(); self.assertFalse(self.ctx.dev.is_open); self.assertEqual(self.ops._keepalive, {})
+        self.assertFalse(self.ctx.dev.is_open); self.assertEqual(self.ops._keepalive, {}); self.assertEqual(self.ctx.dev.owners, {})
+        self.ops.ft_stop(wait=0); self._wait_idle()
 
     def test_ft_stop_without_waiting_returns_at_once(self):
         self._running_receive()

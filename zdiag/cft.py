@@ -76,6 +76,8 @@ class CftConfig:
     idle_timeout: float = 30.0      # give up when all links are down / nothing is acknowledged for this long
     retries: int = 1                # re-send a whole file once when the final CRC does not match
     overwrite: bool = True          # receiver: replace an existing different file (False = keep it, skip)
+    persist: bool = False           # keep waiting (never give up) while links are detached / the peer is away; reconnect by itself
+    watch_ms: int = 500             # how often the supervisor checks that every ticked channel is still open / tries to attach it
 
     def validate(self) -> None:
         if not 0 <= self.base_id <= (0x1FFFFFFD if self.extended else 0x7FD):
@@ -116,6 +118,11 @@ class Link:
         self.backoff = 0.0                                        # seconds slept before every frame while the bus reports error storms
         self._err_mark = 0
         self.on_change: Optional[Callable[["Link", bool], None]] = None
+        self.provider: Optional[Callable[[], Optional[Tuple[Bus, bool, bool]]]] = None   # returns a freshly opened (bus, fd, brs) or None
+        self.validator: Optional[Callable[[Bus], bool]] = None                          # False when `bus` is no longer usable
+        self.attaches = 0
+        self.last_attach = 0.0
+        self.on_attach: Optional[Callable[["Link", bool], None]] = None
 
     @property
     def payload(self) -> int:
@@ -125,9 +132,61 @@ class Link:
     def status_bytes(self) -> int:
         return self.frame_len - 6
 
+    @property
+    def attached(self) -> bool:
+        return self.bus is not None
+
+    def detach(self, why: str = "") -> bool:
+        """The channel went away (device closed / channel stopped): forget the bus; the supervisor keeps trying to get it back."""
+        if self.bus is None:
+            return False
+        self.bus = None
+        was = self.alive
+        self.alive = False
+        self.last_rx = 0.0
+        if was:
+            self.downs += 1
+            if self.on_change:
+                self.on_change(self, False)
+        if self.on_attach:
+            self.on_attach(self, False)
+        return True
+
+    def attach(self, bus: Bus, fd: bool, brs: bool) -> None:
+        self.fd, self.brs = bool(fd), bool(brs)
+        self.frame_len = self.cfg.fd_frame_len if self.fd else 8
+        self.backoff, self._err_mark = 0.0, 0
+        self.bus = bus
+        self.attaches += 1
+        self.last_attach = time.monotonic()
+        if self.on_attach:
+            self.on_attach(self, True)
+
+    def poll(self) -> None:
+        """Supervisor tick: drop a bus that stopped being valid, try to obtain one while detached."""
+        b = self.bus
+        if b is not None:
+            try:
+                ok = self.validator(b) if self.validator else True
+            except Exception:
+                ok = False
+            if not ok:
+                self.detach("通道已关闭")
+            return
+        if self.provider is None:
+            return
+        try:
+            got = self.provider()
+        except Exception:
+            got = None
+        if got:
+            self.attach(*got)
+
     def send(self, can_id: int, data: bytes) -> None:
         if len(data) > self.frame_len:
             raise ValueError("frame too long")
+        if self.bus is None:
+            raise LinkError(f"{self.name} 通道未打开")
         if self.fd:
             data = data.ljust(dlc_len(len(data)), b"\x00")
         fr = CanFrame(can_id, bytes(data), self.cfg.extended, self.fd, self.brs)
@@ -135,9 +194,12 @@ class Link:
         if self.backoff > 0:
             time.sleep(self.backoff)
         for _ in range(100):                                      # a full device TX buffer clears within a few ms
+            bus = self.bus
+            if bus is None:
+                raise LinkError(f"{self.name} 通道未打开")
             try:
                 with self.lock:
-                    self.bus.send(fr)
+                    bus.send(fr)
                 self.tx_frames += 1
                 self.tx_bytes += len(data)
                 return
@@ -148,11 +210,11 @@ class Link:
         raise LinkError(f"{self.name} 发送失败: {err}")
 
     def bus_errors(self) -> int:
-        st = getattr(self.bus, "stats", None)
+        st = getattr(self.bus, "stats", None) if self.bus is not None else None
         return getattr(st, "err", 0) if st is not None else 0
 
     def health(self) -> Dict[str, Any]:
-        fn = getattr(self.bus, "health", None)
+        fn = getattr(self.bus, "health", None) if self.bus is not None else None
         try:
             return fn() if callable(fn) else {}
         except Exception:
@@ -188,12 +250,40 @@ class Link:
         return False
 
 
+def _recv(l: Link):
+    """One frame from the link's bus; None when nothing arrived or the channel is gone (never raises)."""
+    b = l.bus
+    if b is None:
+        time.sleep(0.05)
+        return None
+    try:
+        return b.recv(0.05)
+    except Exception:
+        l.detach("接收出错")
+        return None
+
+
+def _watch(stop: threading.Event, links: List[Link], period: float, log: Callable[[str], None]) -> None:
+    """Keep every ticked channel attached: notice closed channels and reconnect them as soon as they are open again."""
+    while not stop.wait(period):
+        for l in links:
+            was = l.attached
+            n = l.attaches
+            l.poll()
+            if was and not l.attached:
+                log(f"{l.name} 已关闭，等待重新打开…")
+            elif l.attaches != n:
+                log(f"{l.name} 已{'重新' if n else ''}连接")
+
+
 # ====================================================================== reliable small messages
 class Messenger:
     """Stop-and-wait messages (fragmented over control frames) sent on every usable link, acked by the peer."""
 
-    def __init__(self, links: List[Link], tx_id: int, stop: threading.Event, usable: Callable[[Link], bool]) -> None:
+    def __init__(self, links: List[Link], tx_id: int, stop: threading.Event, usable: Callable[[Link], bool],
+                 persist: bool = False) -> None:
         self.links, self.tx_id, self.stop, self.usable = links, tx_id, stop, usable
+        self.persist = persist                                        # never give up on an unanswered message (peer / device away)
         self.inbox: "queue.Queue[Tuple[int, bytes]]" = queue.Queue()
         self._mid = random.randint(1, 255)
         self._wait_id = -1
@@ -213,7 +303,9 @@ class Messenger:
             self._wait_id = mid
             self._acked.clear()
             per_try = max(timeout / tries, 0.2)
-            for _ in range(tries):
+            n = 0
+            while self.persist or n < tries:
+                n += 1
                 sent = 0
                 targets = [l for l in self.links if self.usable(l)] or self.links
                 for l in targets:
@@ -274,6 +366,8 @@ class Messenger:
         end = time.monotonic() + timeout
         while True:
             left = end - time.monotonic()
+            if self.persist:
+                left = max(left, 1.0)
             if left <= 0:
                 raise CftError(f"等待对端消息超时（{kind}）")
             if self.stop.is_set():
@@ -426,12 +520,12 @@ class Sender:
         self.cfg.validate()
         self.links = links
         for l in links:
-            if self.cfg.chunk_bytes > 256 * l.payload:
+            if l.attached and self.cfg.chunk_bytes > 256 * l.payload:
                 raise CftError(f"块大小 {self.cfg.chunk_bytes} 超过 {l.name} 的上限 {256 * l.payload}（每块最多 256 帧）")
         self.stop_ev = threading.Event()
         self.cond = threading.Condition()
         self.log = _Log()
-        self.msg = Messenger(links, self.cfg.id_s2r, self.stop_ev, lambda l: l.alive)
+        self.msg = Messenger(links, self.cfg.id_s2r, self.stop_ev, lambda l: l.alive, self.cfg.persist)
         self.cur: Optional[_SendFile] = None
         self.state = "idle"
         self.error = ""
@@ -477,7 +571,7 @@ class Sender:
 
     @staticmethod
     def _link_info(l: Link) -> Dict[str, Any]:
-        return {"name": l.name, "alive": l.alive, "frame_len": l.frame_len, "fd": l.fd, "tx_frames": l.tx_frames,
+        return {"name": l.name, "alive": l.alive, "attached": l.attached, "attaches": l.attaches, "frame_len": l.frame_len, "fd": l.fd, "tx_frames": l.tx_frames,
                 "tx_bytes": l.tx_bytes, "errors": l.errors, "downs": l.downs, "bus_errors": l.bus_errors(),
                 "backoff_ms": round(l.backoff * 1000), "health": l.health()}
 
@@ -546,6 +640,9 @@ class Sender:
         t = threading.Thread(target=self._hb_loop, daemon=True, name="cft-hb")
         t.start()
         self._threads.append(t)
+        t = threading.Thread(target=_watch, args=(self.stop_ev, self.links, self.cfg.watch_ms / 1000.0, self.log), daemon=True, name="cft-watch")
+        t.start()
+        self._threads.append(t)
 
     def _handshake(self, nfiles: int) -> None:
         self.state = "connecting"
@@ -563,7 +660,7 @@ class Sender:
     # ------------------------------------------------------------ rx / heartbeat
     def _rx_loop(self, l: Link) -> None:
         while not self.stop_ev.is_set():
-            fr = l.bus.recv(0.05)
+            fr = _recv(l)
             if fr is None or fr.rtr or fr.can_id != self.cfg.id_r2s or not fr.data:
                 continue
             l.rx_frames += 1
@@ -672,10 +769,12 @@ class Sender:
                     if fs.inflight.get(idx) is rec:
                         rec[1] = time.monotonic()
             except LinkError as e:
-                self.log(str(e))
                 with self.cond:
+                    if l.attached:
+                        self.log(str(e))
+                        if l.alive:
+                            l.downs += 1
                     l.alive = False
-                    l.downs += 1
                     for c, r in list(fs.inflight.items()):
                         if r[0] == l.idx:
                             fs.requeue(c)
@@ -851,11 +950,11 @@ class Sender:
                     return
                 if any(l.alive for l in self.links):
                     idle_since = None
-                    if now - fs.last_progress > self.cfg.idle_timeout:
+                    if now - fs.last_progress > self.cfg.idle_timeout and not self.cfg.persist:
                         raise CftError(f"{self.cfg.idle_timeout:g} 秒内没有任何块被确认；" + self._diag_all())
                 else:
                     idle_since = idle_since or now
-                    if now - idle_since > self.cfg.idle_timeout:
+                    if now - idle_since > self.cfg.idle_timeout and not self.cfg.persist:
                         raise CftError("所有链路都断开了；" + self._diag_all())
                 self.cond.wait(0.01)
 
@@ -913,7 +1012,8 @@ class Receiver:
         self.links, self.dest, self.once = links, os.path.abspath(dest), once
         self.stop_ev = threading.Event()
         self.log = _Log()
-        self.msg = Messenger(links, self.cfg.id_r2s, self.stop_ev, lambda l: time.monotonic() - l.last_rx < 2.0 and l.last_rx > 0)
+        self.msg = Messenger(links, self.cfg.id_r2s, self.stop_ev, lambda l: time.monotonic() - l.last_rx < 2.0 and l.last_rx > 0,
+                             self.cfg.persist)
         self.act: Optional[_Active] = None
         self.state = "waiting"
         self.error = ""
@@ -951,8 +1051,8 @@ class Receiver:
                 "failed": list(self.failed), "bytes_total": self.bytes_total, "bytes_done": done, "speed_bps": round(speed),
                 "elapsed_s": round(time.time() - self.started, 1) if self.started else 0,
                 "links": [{"name": l.name, "alive": time.monotonic() - l.last_rx < 2.0 and l.last_rx > 0, "frame_len": l.frame_len,
-                           "fd": l.fd, "tx_frames": l.tx_frames, "rx_frames": l.rx_frames, "errors": l.errors,
-                           "bus_errors": l.bus_errors(), "health": l.health()} for l in self.links],
+                           "fd": l.fd, "attached": l.attached, "attaches": l.attaches, "tx_frames": l.tx_frames,
+                           "rx_frames": l.rx_frames, "errors": l.errors, "bus_errors": l.bus_errors(), "health": l.health()} for l in self.links],
                 "bad_chunks": self.bad_total}
 
     # ------------------------------------------------------------ run
@@ -965,6 +1065,9 @@ class Receiver:
             t.start()
             self._threads.append(t)
         t = threading.Thread(target=self._status_loop, daemon=True, name="cft-status")
+        t.start()
+        self._threads.append(t)
+        t = threading.Thread(target=_watch, args=(self.stop_ev, self.links, self.cfg.watch_ms / 1000.0, self.log), daemon=True, name="cft-watch")
         t.start()
         self._threads.append(t)
         try:
@@ -1009,7 +1112,7 @@ class Receiver:
     # ------------------------------------------------------------ frames
     def _rx_loop(self, l: Link) -> None:
         while not self.stop_ev.is_set():
-            fr = l.bus.recv(0.05)
+            fr = _recv(l)
             if fr is None or fr.rtr or not fr.data:
                 continue
             if fr.can_id == self.cfg.id_data:

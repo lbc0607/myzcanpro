@@ -633,8 +633,10 @@ class FileTransferTests(Base):
         self.assertEqual((w.role, w.b_start.text()), ("receive", "开始接收"))
         w.c_role.setCurrentIndex(0)
         self.assertEqual((w.role, w.b_start.text()), ("send", "开始发送"))
-        w.b_start.click()                                                  # no channel started
+        w._boxes[0].setChecked(False)
+        w.b_start.click()                                                  # no channel ticked
         self.assertTrue(msgs("warn"))
+        w._boxes[0].setChecked(True)
         self.up(0)
         W.QMessageBox.calls.clear(); w.b_start.click()                    # channel ok, nothing to send
         self.assertTrue(msgs("warn")); self.assertFalse(w.running())
@@ -682,18 +684,28 @@ class FileTransferTests(Base):
         t0 = time.monotonic()
         self.ctx.dev.close()                                                # no veto, no long wait
         self.assertLess(time.monotonic() - t0, 3.0); self.assertFalse(self.ctx.dev.is_open)
+        self.assertEqual(self.ctx.dev.owners, {})                           # the device really closed: the transfer let go of the channel
+        self.assertTrue(w.running())                                        # ...but keeps watching it and waits for the reopen
+        w._tick(); self.assertIn("未打开", w.l_links.text())
+        w.b_stop.click()
         for _ in range(100):
             if not w.running(): break
             time.sleep(0.05)
         self.assertFalse(w.running())
 
     def test_busy_channel_is_reported(self):
+        import tempfile
         self.up(0)
         w = self.win
         tok = object(); self.ctx.dev.acquire(0, tok)                        # another window holds the channel
-        w.c_role.setCurrentIndex(1); w.e_dest.setText("x"); W.QMessageBox.calls.clear(); w.b_start.click()
-        self.assertTrue(msgs("warn")); self.assertFalse(w.running())
+        w.c_role.setCurrentIndex(1); w.e_dest.setText(tempfile.mkdtemp()); W.QMessageBox.calls.clear(); w.b_start.click()
+        self.assertTrue(w.running()); w._tick(); self.assertIn("未打开", w.l_links.text())   # waits until the other window lets go
         self.ctx.dev.release(tok)
+        for _ in range(60):
+            if self.ctx.dev.owners.get(0) is not None: break                # attached by the supervisor
+            time.sleep(0.1)
+        self.assertIsNotNone(self.ctx.dev.owners.get(0))
+        w.b_stop.click()
 
 
 class CrcUiTests(Base):

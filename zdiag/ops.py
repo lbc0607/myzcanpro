@@ -130,7 +130,12 @@ class Ops:
         """Ask everything of ours that uses channel `ch` to stop (flags only, never blocks; the threads wind down by themselves)."""
         for j in list(self._ft.values()):
             if ch in getattr(j, "channels", ()):
-                j.engine.stop()
+                if getattr(j.engine.cfg, "persist", False):            # a transfer that reconnects by itself only lets go of the channel
+                    for i, c in enumerate(j.channels):
+                        if c == ch and i < len(j.engine.links):
+                            j.engine.links[i].detach("通道被关闭")
+                else:
+                    j.engine.stop()
         for s in list(self._senders.values()):
             if s["ch"] == ch:
                 s["ev"].set()
@@ -780,10 +785,16 @@ class Ops:
         cfg = self.ctx.dev.cfg_of(ch)
         return bus, bool(cfg and cfg.is_fd), bool(cfg and cfg.brs), lambda: self._drop(ch)
 
+    def _ft_valid(self, ch: int, bus) -> bool:
+        """Is `bus` still the live bus of channel `ch` (device open, channel started)?  (tests replace this)"""
+        d = self.ctx.dev
+        c = d.chans.get(ch)
+        return bool(d.is_open and c is not None and c.bus is bus)
+
     def _ft_config(self, base_id: str, chunk_bytes: int, window: int, fd_frame_len: int, extended: bool, overwrite: bool = True,
-                   link_timeout_ms: int = 600, idle_timeout_s: int = 30):
+                   link_timeout_ms: int = 600, idle_timeout_s: int = 30, persist: bool = True):
         try:
-            c = cftmod.CftConfig(base_id=parse_id(base_id) if isinstance(base_id, str) else int(base_id), extended=bool(extended),
+            c = cftmod.CftConfig(persist=bool(persist), base_id=parse_id(base_id) if isinstance(base_id, str) else int(base_id), extended=bool(extended),
                                  chunk_bytes=_int(chunk_bytes, "块大小", 64, 15000), window=_int(window, "窗口", 1, 128),
                                  fd_frame_len=_int(fd_frame_len, "FD 帧长度", 12, 64), overwrite=bool(overwrite),
                                  link_timeout=_int(link_timeout_ms, "链路超时(ms)", 100, 10000) / 1000.0,
@@ -803,40 +814,74 @@ class Ops:
             busy = {c for j in self._ft.values() if j.running() for c in j.channels}
         if busy & set(chans):
             raise OpsError(f"通道 {sorted(busy & set(chans))} 正被另一个文件传输使用")
-        opened, links = [], []
+        rels: Dict[int, Any] = {}                                  # channel -> release callback while the link holds the channel
+        rlock = threading.Lock()
+        links: List[Any] = []
+
+        def let_go(ch: int) -> None:
+            with rlock:
+                rel = rels.pop(ch, None)
+            if rel is not None:
+                rel()
+
+        def mk_provider(ch: int):
+            def provider():
+                try:
+                    bus, fd, brs, rel = self._ft_open(ch)
+                except Exception:
+                    return None                                    # not started yet: the supervisor tries again
+                with rlock:
+                    rels[ch] = rel
+                return bus, fd, brs
+            return provider
+
         try:
             for i, ch in enumerate(chans):
-                bus, fd, brs, rel = self._ft_open(ch)
-                opened.append(rel)
-                links.append(cftmod.Link(i, bus, fd, brs, cfg, f"通道{ch}"))
+                l = cftmod.Link(i, None, False, False, cfg, f"通道{ch}")
+                l.provider = mk_provider(ch)
+                l.validator = (lambda b, ch=ch: self._ft_valid(ch, b))
+                l.on_attach = (lambda lk, up, ch=ch: None if up else let_go(ch))
+                got = l.provider()
+                if got:
+                    l.attach(*got)
+                elif not cfg.persist:
+                    raise OpsError(f"通道{ch} 还没有打开：请先打开设备并启动该通道")
+                links.append(l)
             engine = make(links)
         except Exception as e:
-            for rel in opened:
-                rel()
+            for ch in chans:
+                let_go(ch)
             raise OpsError(str(e))
 
         def done() -> None:
-            for rel in opened:
-                rel()
+            for l in links:
+                l.detach("传输结束")
+            for ch in chans:
+                let_go(ch)
         job = cftmod.CftJob(engine, engine._runner, done)
         job.channels = chans
         with self.lock:
             self._ft[role] = job
         job.start()
-        return {"started": True, "role": role, "channels": chans, "message": "已开始，用 ft_status 查看进度"}
+        waiting = [c for c, l in zip(chans, links) if not l.attached]
+        return {"started": True, "role": role, "channels": chans, "waiting_channels": waiting,
+                "message": "已开始，用 ft_status 查看进度" + (f"；通道 {waiting} 还没打开，打开后会自动连接" if waiting else "")}
 
     def ft_send(self, channels: List[int], paths: List[str], base_id: str = "6A0", chunk_bytes: int = 1024, window: int = 128,
-                fd_frame_len: int = 64, extended: bool = False, link_timeout_ms: int = 600, idle_timeout_s: int = 30) -> Dict[str, Any]:
+                fd_frame_len: int = 64, extended: bool = False, link_timeout_ms: int = 600, idle_timeout_s: int = 30,
+                reconnect: bool = True) -> Dict[str, Any]:
         """Send files / whole folders to a peer running ft_receive, over 1~2 CAN / CAN FD channels (background job).
         With two channels the file is split between them; if one goes silent the other carries on and the lost one is used again when it
-        returns. A transfer that was interrupted continues where it stopped when the same files are sent again."""
+        returns. reconnect=True (default): from the start it keeps watching the chosen channels - not-yet-open channels are attached as soon
+        as they are open, a channel whose device was unplugged / closed is re-attached when it is started again, and the transfer resumes by
+        itself (it never gives up; ft_stop ends it). A transfer that was interrupted continues where it stopped when the same files are sent again."""
         ps = [paths] if isinstance(paths, str) else list(paths or [])
         if not ps:
             raise OpsError("需要要发送的文件或文件夹路径 (paths)")
         for p in ps:
             if not os.path.exists(p):
                 raise OpsError(f"路径不存在: {p}")
-        cfg = self._ft_config(base_id, chunk_bytes, window, fd_frame_len, extended, True, link_timeout_ms, idle_timeout_s)
+        cfg = self._ft_config(base_id, chunk_bytes, window, fd_frame_len, extended, True, link_timeout_ms, idle_timeout_s, reconnect)
 
         def make(links):
             e = cftmod.Sender(links, cfg)
@@ -845,12 +890,13 @@ class Ops:
         return self._ft_start("send", channels, cfg, make)
 
     def ft_receive(self, channels: List[int], dest: str, base_id: str = "6A0", overwrite: bool = True, once: bool = True,
-                   chunk_bytes: int = 1024, window: int = 128, fd_frame_len: int = 64, extended: bool = False) -> Dict[str, Any]:
+                   chunk_bytes: int = 1024, window: int = 128, fd_frame_len: int = 64, extended: bool = False,
+                   reconnect: bool = True) -> Dict[str, Any]:
         """Receive into the folder `dest` (created when missing); base_id / extended / fd_frame_len must match the sender.
         once=True ends after one sender finished, False keeps listening until ft_stop. Partial files stay as <name>.cftpart for resuming."""
         if not dest:
             raise OpsError("需要保存目录 (dest)")
-        cfg = self._ft_config(base_id, chunk_bytes, window, fd_frame_len, extended, overwrite)
+        cfg = self._ft_config(base_id, chunk_bytes, window, fd_frame_len, extended, overwrite, persist=reconnect)
 
         def make(links):
             e = cftmod.Receiver(links, dest, cfg, once=bool(once))

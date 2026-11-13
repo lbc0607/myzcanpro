@@ -259,24 +259,32 @@ async def lin_scan_pump(nad: str, dids: Optional[List[Any]] = None, session: boo
 # --------------------------------------------------------------------------- CAN file transfer
 @mcp.tool()
 async def ft_send(channels: List[int], paths: List[str], base_id: str = "6A0", chunk_bytes: int = 1024, window: int = 128,
-                  fd_frame_len: int = 64, extended: bool = False, link_timeout_ms: int = 600, idle_timeout_s: int = 30) -> Dict[str, Any]:
+                  fd_frame_len: int = 64, extended: bool = False, link_timeout_ms: int = 600, idle_timeout_s: int = 30,
+                  reconnect: bool = True) -> Dict[str, Any]:
     """Send files and/or whole folders over CAN / CAN FD to a peer running ft_receive (any file type, background job, poll ft_status).
     channels: 1 or 2 started channel numbers, e.g. [0, 1]; with two, the file is split between them and if one goes silent the other
     carries on (and the lost one is used again when it returns). CAN FD channels use long frames automatically (fd_frame_len 64).
     An interrupted transfer resumes where it stopped when the same paths are sent again. base_id (hex) = first of 3 consecutive CAN IDs;
-    base_id / extended / fd_frame_len / chunk_bytes should be identical on both ends."""
+    base_id / extended / fd_frame_len / chunk_bytes should be identical on both ends.
+    reconnect=True (default): the job watches the chosen channels from the start - channels that are not open yet are attached as soon
+    as they are started, and after a device unplug / re-open the transfer resumes by itself once the channel is open again; it never
+    gives up until ft_stop. reconnect=False: fail at once when a channel is not open / nothing is acknowledged for idle_timeout_s."""
     return await call("ft_send", channels=channels, paths=paths, base_id=base_id, chunk_bytes=chunk_bytes, window=window,
-                      fd_frame_len=fd_frame_len, extended=extended, link_timeout_ms=link_timeout_ms, idle_timeout_s=idle_timeout_s)
+                      fd_frame_len=fd_frame_len, extended=extended, link_timeout_ms=link_timeout_ms, idle_timeout_s=idle_timeout_s,
+                      reconnect=reconnect)
 
 
 @mcp.tool()
 async def ft_receive(channels: List[int], dest: str, base_id: str = "6A0", overwrite: bool = True, once: bool = True,
-                     chunk_bytes: int = 1024, window: int = 128, fd_frame_len: int = 64, extended: bool = False) -> Dict[str, Any]:
+                     chunk_bytes: int = 1024, window: int = 128, fd_frame_len: int = 64, extended: bool = False,
+                     reconnect: bool = True) -> Dict[str, Any]:
     """Receive files / folders sent by ft_send into folder `dest` (background job, poll ft_status). Start it BEFORE the sender.
     once=True stops after one sender finished; False keeps listening until ft_stop. Unfinished files stay as <name>.cftpart (+ .cftmeta)
-    and are continued by the next transfer of the same file. overwrite=False keeps an existing different file."""
+    and are continued by the next transfer of the same file. overwrite=False keeps an existing different file.
+    reconnect=True (default): keeps watching the chosen channels (not-yet-open ones are attached when started, re-attached after the
+    device is re-opened) and never gives up until ft_stop."""
     return await call("ft_receive", channels=channels, dest=dest, base_id=base_id, overwrite=overwrite, once=once,
-                      chunk_bytes=chunk_bytes, window=window, fd_frame_len=fd_frame_len, extended=extended)
+                      chunk_bytes=chunk_bytes, window=window, fd_frame_len=fd_frame_len, extended=extended, reconnect=reconnect)
 
 
 @mcp.tool()
