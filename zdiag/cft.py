@@ -8,11 +8,14 @@ CAN IDs (base = cfg.base_id): base   control  sender -> receiver   (messages, he
                               base+1 control  receiver -> sender   (messages, acks, STATUS)
                               base+2 data     sender -> receiver
 Data frame   [epoch][chunk & 0xFF][frame idx][payload ...]        always a full frame (8 / FD length), payload = len - 3
+             the chunk's stream is  data + CRC32(data)  (4 bytes): a chunk whose CRC does not match is dropped and simply re-sent
 Control      [T_MSG][msg id][frag idx | 0x80 if last][payload len][payload]    reliable small messages (stop-and-wait, acked)
              [T_ACK][msg id]   [T_HB][link]   [T_STATUS][epoch][base u32][bitmap: bit i = chunk base+1+i received]
 A file is cut into `chunk_bytes` chunks; the receiver reports `base` (first missing chunk) + a bitmap inside the window, the sender
 re-sends on timeout / when later chunks of the same link were acked.  The receiver writes `<name>.cftpart` plus `<name>.cftmeta`
-(received-chunk state); a later session with the same file continues where it stopped.  The end-to-end check is CRC32 of the file."""
+(received-chunk state); a later session with the same file continues where it stopped.  The end-to-end check is CRC32 of the file;
+when it does not match, nothing is thrown away: both sides compare per-segment CRCs (M_SEGQ/M_SEGR), only the segments that differ
+are sent again (M_REPAIR, a sub-transfer of one chunk range under a new epoch) and the file is verified again."""
 from __future__ import annotations
 
 import collections
@@ -30,10 +33,16 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 from .bus import Bus, CanFrame
 
-VERSION = 1
+VERSION = 2                     # 2: every chunk carries its own CRC32
+META_VERSIONS = (1, 2)          # a v1 `.cftmeta` is still good for resuming (only the wire format changed)
 FD_LENS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64)
 T_MSG, T_ACK, T_HB, T_STATUS = 1, 2, 3, 4
 M_HELLO, M_HELLO_OK, M_OFFER, M_REPLY, M_END, M_RESULT, M_BYE = 1, 2, 3, 4, 5, 6, 7
+M_SEGQ, M_SEGR, M_REPAIR, M_DISCARD = 8, 9, 10, 11
+CRC_LEN = 4
+SEG_BYTES = 4 << 20             # repair granularity: segments of this size (rounded to whole chunks) are compared by CRC
+SEG_PER_MSG = 100               # CRCs per M_SEGR message (a message is at most 128 control frames)
+REPAIR_ROUNDS = 3
 A_RECEIVE, A_SKIP, A_REJECT = 0, 1, 2
 F_FILE, F_DIR = 0, 1
 HEAD_BYTES = 4096
@@ -653,6 +662,7 @@ class Sender:
             fs, idx, rec = job
             try:
                 data = fs.read(idx)
+                data += struct.pack(">I", zlib.crc32(data) & 0xFFFFFFFF)
                 p = l.payload
                 head = bytes((fs.epoch, idx & 0xFF))
                 for fi in range(max(1, (len(data) + p - 1) // p)):
@@ -726,18 +736,92 @@ class Sender:
             if self.stop_ev.is_set():
                 raise CftError(self.error or "已停止")
             crc = file_crc(e["abs"], self.stop_ev)
-            self.msg.send(M_END, struct.pack(">BQI", epoch, e["size"], crc), timeout=10.0, tries=10)
-            p = self.msg.expect(M_RESULT, 120.0 + e["size"] / 2e7)
         finally:
             with self.cond:
                 self.cur = None
             fs.close()
-        ok = bool(p[1])
+        ok, text = self._finish(e, epoch, crc)
         if ok:
             self.files_done += 1
             self.bytes_done += e["size"]
             return True, ""
-        return False, p[2:].decode("utf-8", "replace") or "对端校验失败"
+        return False, text or "对端校验失败"
+
+    def _next_epoch(self) -> int:
+        self._epoch = getattr(self, "_epoch", 0) % 255 + 1
+        return self._epoch
+
+    def _finish(self, e: Dict[str, Any], epoch: int, crc: int) -> Tuple[bool, str]:
+        """END -> RESULT.  A whole-file CRC mismatch is repaired segment by segment instead of starting over."""
+        wait = 120.0 + e["size"] / 2e7
+        for rnd in range(REPAIR_ROUNDS + 1):
+            self.msg.send(M_END, struct.pack(">BQI", epoch, e["size"], crc), timeout=10.0, tries=10)
+            p = self.msg.expect(M_RESULT, wait)
+            if p[1] != 2:
+                return bool(p[1]), p[2:].decode("utf-8", "replace")
+            if rnd == REPAIR_ROUNDS:
+                break
+            self.log(f"{e['rel']}: 整文件 CRC 不一致，按段比对定位坏块（第 {rnd + 1} 轮）")
+            nxt = self._repair(e, epoch, wait)
+            if nxt is None:
+                break
+            epoch = nxt
+        self.msg.send(M_DISCARD, bytes([epoch]), timeout=10.0, tries=10)
+        return False, "CRC 校验不一致且按段修复没有成功，已丢弃对端数据，将重新发送"
+
+    def _seg_crc(self, e: Dict[str, Any], lo: int, hi: int) -> int:
+        chunk, crc = self.cfg.chunk_bytes, 0
+        with open(e["abs"], "rb") as f:
+            f.seek(lo * chunk)
+            left = min(e["size"], hi * chunk) - lo * chunk
+            while left > 0:
+                if self.stop_ev.is_set():
+                    raise CftError("已停止")
+                b = f.read(min(left, 1 << 20))
+                if not b:
+                    break
+                crc = zlib.crc32(b, crc)
+                left -= len(b)
+        return crc & 0xFFFFFFFF
+
+    def _repair(self, e: Dict[str, Any], epoch: int, wait: float) -> Optional[int]:
+        """Compare segment CRCs with the receiver, re-send only the segments that differ. Returns the new epoch (None: nothing found)."""
+        chunk = self.cfg.chunk_bytes
+        n = (e["size"] + chunk - 1) // chunk
+        spc = max(1, SEG_BYTES // chunk)
+        nseg = (n + spc - 1) // spc
+        bad: List[Tuple[int, int]] = []
+        for s0 in range(0, nseg, SEG_PER_MSG):
+            cnt = min(SEG_PER_MSG, nseg - s0)
+            self.msg.send(M_SEGQ, struct.pack(">BIH", epoch, s0, cnt), timeout=10.0, tries=10)
+            p = self.msg.expect(M_SEGR, wait)                       # the first query makes the receiver read its whole file
+            _, first, got = struct.unpack(">BIH", p[:7])
+            theirs = struct.unpack(f">{got}I", p[7:7 + 4 * got])
+            for i, rc in enumerate(theirs):
+                lo, hi = (first + i) * spc, min(n, (first + i + 1) * spc)
+                if self._seg_crc(e, lo, hi) != rc:
+                    bad.append((lo, hi))
+        if not bad:
+            return None
+        self.log(f"{e['rel']}: {len(bad)}/{nseg} 段不一致，只重发这些段（约 {sum(h - l for l, h in bad) * chunk} 字节）")
+        for lo, hi in bad:
+            epoch = self._next_epoch()
+            self.msg.send(M_REPAIR, struct.pack(">BII", epoch, lo, hi), timeout=10.0, tries=10)
+            self.msg.expect(M_REPLY, 20.0)
+            fs = _SendFile(e, epoch, chunk, lo)
+            fs.n = hi
+            with self.cond:
+                self.cur = fs
+                self.cond.notify_all()
+            try:
+                self._pump(fs)
+                if self.stop_ev.is_set():
+                    raise CftError(self.error or "已停止")
+            finally:
+                with self.cond:
+                    self.cur = None
+                fs.close()
+        return epoch
 
     def _pump(self, fs: _SendFile) -> None:
         """Supervise one file until every chunk is acknowledged."""
@@ -781,8 +865,11 @@ class _Active:
     def __init__(self, e: Dict[str, Any], epoch: int, chunk: int, final: str, base: int, extra: set) -> None:
         self.e, self.epoch, self.chunk, self.size, self.final = e, epoch, chunk, e["size"], final
         self.part, self.meta = final + PART, final + META
-        self.n = (self.size + chunk - 1) // chunk
+        self.n = self.n_full = (self.size + chunk - 1) // chunk
         self.base, self.done = base, set(extra)
+        self.mismatch = self.repairing = False                    # whole-file CRC failed / a segment repair is running (n = range end)
+        self.segtab: Optional[List[int]] = None
+        self.bad_chunks = 0
         self.bufs: Dict[int, Tuple[bytearray, bytearray]] = {}
         self.lock = threading.Lock()
         self.fh = None
@@ -809,6 +896,11 @@ class _Active:
         tmp = self.meta + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(m, f)
+            f.flush()
+            try:
+                os.fsync(f.fileno())                                # else a power cut can leave an empty meta = restart from zero
+            except OSError:
+                pass
         os.replace(tmp, self.meta)
 
 
@@ -827,6 +919,7 @@ class Receiver:
         self.error = ""
         self.window = 128
         self._nonce = -1
+        self.bad_total = 0                                         # chunks dropped because their own CRC did not match
         self.files_done = self.files_skipped = 0
         self.failed: List[str] = []
         self.bytes_total = self.files_total = 0
@@ -859,7 +952,8 @@ class Receiver:
                 "elapsed_s": round(time.time() - self.started, 1) if self.started else 0,
                 "links": [{"name": l.name, "alive": time.monotonic() - l.last_rx < 2.0 and l.last_rx > 0, "frame_len": l.frame_len,
                            "fd": l.fd, "tx_frames": l.tx_frames, "rx_frames": l.rx_frames, "errors": l.errors,
-                           "bus_errors": l.bus_errors(), "health": l.health()} for l in self.links]}
+                           "bus_errors": l.bus_errors(), "health": l.health()} for l in self.links],
+                "bad_chunks": self.bad_total}
 
     # ------------------------------------------------------------ run
     def run(self) -> Dict[str, Any]:
@@ -885,6 +979,12 @@ class Receiver:
                     self._offer(p)
                 elif kind == M_END:
                     self._end(p)
+                elif kind == M_SEGQ:
+                    self._segq(p)
+                elif kind == M_REPAIR:
+                    self._repair(p)
+                elif kind == M_DISCARD:
+                    self._discard(p)
                 elif kind == M_BYE:
                     self._close_active()
                     self.state = "done" if not self.failed else "done_with_errors"
@@ -935,19 +1035,27 @@ class Receiver:
             if cand - a.base >= a.window or cand >= a.n or cand in a.done:
                 return
             clen = min(a.chunk, a.size - cand * a.chunk)
+            slen = clen + CRC_LEN                                  # the chunk's stream: data + CRC32
             buf = a.bufs.get(cand)
             if buf is None:
-                buf = a.bufs[cand] = (bytearray(clen), bytearray(clen))
+                buf = a.bufs[cand] = (bytearray(slen), bytearray(slen))
             off = fi * p
-            n = min(p, clen - off)
+            n = min(p, slen - off)
             if n <= 0 or a.fh is None:
                 return
             buf[0][off:off + n] = d[3:3 + n]
             buf[1][off:off + n] = _ONES[:n]
             if 0 in buf[1]:
                 return
-            a.write(cand, bytes(buf[0]))
             del a.bufs[cand]
+            body = bytes(buf[0])
+            if zlib.crc32(body[:clen]) & 0xFFFFFFFF != struct.unpack(">I", body[clen:])[0]:
+                self.bad_total += 1
+                a.bad_chunks += 1                                  # damaged (or frames of two sends mixed): drop, the sender re-sends it
+                if a.bad_chunks <= 3 or a.bad_chunks % 100 == 0:
+                    self.log(f"块 {cand} 校验失败，丢弃等待重发（累计 {a.bad_chunks}）")
+                return
+            a.write(cand, body[:clen])
             a.done.add(cand)
             a.dirty = True
             while a.base in a.done:
@@ -1084,7 +1192,7 @@ class Receiver:
         try:
             with open(a.meta, "r", encoding="utf-8") as f:
                 m = json.load(f)
-            ok = (m.get("v") == VERSION and m["size"] == a.size and m["mtime_ms"] == a.e["mtime_ms"] and m["head"] == a.e["head"]
+            ok = (m.get("v") in META_VERSIONS and m["size"] == a.size and m["mtime_ms"] == a.e["mtime_ms"] and m["head"] == a.e["head"]
                   and m["chunk"] == a.chunk and os.path.isfile(a.part))
             base, extra = int(m["base"]), set(int(x) for x in m["done"])
             if ok and os.path.getsize(a.part) >= min(a.size, base * a.chunk) and base <= a.n:
@@ -1108,15 +1216,18 @@ class Receiver:
         else:
             with a.lock:
                 complete = a.base >= a.n
+                if complete and a.repairing:                       # the repaired range is whole: back to the full file
+                    a.n, a.base, a.done, a.repairing = a.n_full, a.n_full, set(), False
             if not complete:
                 text = f"还缺 {a.n - a.base} 块"
             else:
                 try:
                     with a.lock:
-                        a.fh.flush()
-                        a.fh.truncate(a.size)
-                        a.fh.close()
-                        a.fh = None
+                        if a.fh is not None:
+                            a.fh.flush()
+                            a.fh.truncate(a.size)
+                            a.fh.close()
+                            a.fh = None
                     got = file_crc(a.part, self.stop_ev)
                     if os.path.getsize(a.part) == size and got == crc:
                         os.replace(a.part, a.final)
@@ -1132,18 +1243,73 @@ class Receiver:
                         self.log(f"完成 {a.e['rel']}（CRC32 {got:08X}）")
                     else:
                         text = f"CRC 校验不一致（收到 {got:08X}，应为 {crc:08X}）"
-                        for f in (a.part, a.meta):
-                            try:
-                                os.remove(f)
-                            except OSError:
-                                pass
-                        self.log(f"{a.e['rel']}: {text}，已丢弃，等待重发")
+                        a.mismatch, a.segtab = True, None           # keep every received byte: the sender locates the damaged segments
+                        self.log(f"{a.e['rel']}: {text}，保留已收数据，等待按段比对修复")
+                        self.msg.send(M_RESULT, struct.pack(">BB", epoch, 2) + text.encode("utf-8")[:200], timeout=10.0, tries=10)
+                        return
                 except OSError as e:
                     text = f"写文件失败: {e}"
         self.act = None
         if not ok and a is not None and text and "CRC" not in text:
             self.failed.append(a.e["rel"])
         self.msg.send(M_RESULT, struct.pack(">BB", epoch, 1 if ok else 0) + text.encode("utf-8")[:200], timeout=10.0, tries=10)
+
+
+    # ------------------------------------------------------------ repair of a file whose whole-file CRC did not match
+    def _segq(self, p: bytes) -> None:
+        epoch, first, cnt = struct.unpack(">BIH", p[:7])
+        a = self.act
+        if a is None or a.epoch != epoch or not (a.mismatch or a.repairing):
+            return
+        if a.segtab is None:                                       # one pass over the file, then every query is answered from memory
+            spc = max(1, SEG_BYTES // a.chunk)
+            seg = spc * a.chunk
+            tab: List[int] = []
+            with open(a.part, "rb") as f:
+                for s in range(0, (a.n_full + spc - 1) // spc):
+                    crc, left = 0, min(seg, a.size - s * seg)
+                    while left > 0:
+                        if self.stop_ev.is_set():
+                            raise CftError("已停止")
+                        b = f.read(min(left, 1 << 20))
+                        if not b:
+                            break
+                        crc = zlib.crc32(b, crc)
+                        left -= len(b)
+                    tab.append(crc & 0xFFFFFFFF)
+            a.segtab = tab
+        part = a.segtab[first:first + cnt]
+        self.msg.send(M_SEGR, struct.pack(">BIH", epoch, first, len(part)) + struct.pack(f">{len(part)}I", *part), timeout=10.0, tries=10)
+
+    def _repair(self, p: bytes) -> None:
+        epoch, lo, hi = struct.unpack(">BII", p[:9])
+        a = self.act
+        if a is None or not (a.mismatch or a.repairing) or not 0 <= lo < hi <= a.n_full:
+            self._reply(epoch, A_REJECT, 0, "没有可修复的文件")
+            return
+        with a.lock:
+            if a.fh is None:
+                a.fh = open(a.part, "r+b")
+            a.epoch, a.base, a.n, a.done, a.repairing, a.segtab = epoch, lo, hi, set(), True, None
+            a.bufs.clear()
+            a.dirty = True
+        self._reply(epoch, A_RECEIVE, lo)
+        self.log(f"修复 {a.e['rel']}：重收第 {lo}~{hi - 1} 块")
+
+    def _discard(self, p: bytes) -> None:
+        a, self.act = self.act, None
+        if a is None:
+            return
+        with a.lock:
+            if a.fh is not None:
+                a.fh.close()
+                a.fh = None
+        for f in (a.part, a.meta):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        self.log(f"{a.e['rel']}: 修复没有成功，已丢弃已收数据，等待重新发送")
 
 
 # ====================================================================== background job (ops / UI)

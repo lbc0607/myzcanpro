@@ -15,6 +15,8 @@ class _End(Bus):
         if c.cut or (c.drop and self.rnd.random() < c.drop) or (c.cut_dir and self.cut_dir_hit(fr)):
             return
         self.sent += 1
+        if c.corrupt is not None:
+            fr = c.corrupt(self, fr)
         self.inner.send(fr)
 
     def cut_dir_hit(self, fr):
@@ -36,6 +38,7 @@ class Cable:
     def __init__(self, seed=1, drop=0.0):
         a, b = VirtualBus.pair()
         self.cut, self.drop, self.cut_dir = False, drop, False
+        self.corrupt = None                              # callable(end, frame) -> frame: damage frames in flight
         self.s, self.r = _End(a, self, seed), _End(b, self, seed + 100)
 
 
@@ -305,3 +308,58 @@ class ErrorStormPacing(unittest.TestCase):
         info = Sender._link_info(l)
         self.assertEqual((info["bus_errors"], info["health"]["tec"]), (7, 130))
         self.assertIn("TEC=130", Sender._diag_text(l)); self.assertIn("重启通道 2 次", Sender._diag_text(l))
+
+
+class Integrity(Base):
+    """Per-chunk CRC and the segment-wise repair of a file whose whole-file CRC does not match."""
+
+    def test_damaged_frames_are_caught_by_the_chunk_crc(self):
+        from zdiag.bus import CanFrame
+        cb = Cable(seed=3)
+        rnd = random.Random(5)
+
+        def corrupt(end, fr):
+            if end is cb.s and fr.can_id == 0x6A2 and rnd.random() < 0.03:       # a data frame with one flipped byte (CAN's own CRC missed it)
+                d = bytearray(fr.data); d[10] ^= 0x55
+                return CanFrame(fr.can_id, bytes(d), fr.extended, fr.fd, fr.brs)
+            return fr
+        cb.corrupt = corrupt
+        f = os.path.join(self.src, "x.bin"); make_file(f, 120_000, seed=9)
+        snd, rcv, res = self.run_pair([cb], [f])
+        self.assertEqual(res["s"]["state"], "done", res["s"]["error"])
+        self.assertTrue(same(f, os.path.join(self.dst, "x.bin")))
+        self.assertGreater(rcv.bad_total, 0)                                            # damaged chunks were dropped and re-sent
+
+    def _flip_writes(self, bad_chunks, always):
+        from zdiag import cft
+        orig, seen = cft._Active.write, set()
+
+        def write(a, idx, data):                                                        # silent damage AFTER the chunk CRC check (disk / bug)
+            if idx in bad_chunks and (always or idx not in seen):
+                seen.add(idx)
+                data = bytes([data[0] ^ 0xFF]) + data[1:]
+            return orig(a, idx, data)
+        cft._Active.write = write
+        old_seg = cft.SEG_BYTES
+        cft.SEG_BYTES = 8000                                                            # 8 chunks of 1000 B per segment
+        self.addCleanup(setattr, cft._Active, "write", orig)
+        self.addCleanup(setattr, cft, "SEG_BYTES", old_seg)
+
+    def test_crc_mismatch_resends_only_the_bad_segments(self):
+        self._flip_writes({37, 150}, always=False)
+        f = os.path.join(self.src, "big.bin"); make_file(f, 200_000, seed=11)           # 200 chunks, 25 segments
+        snd, rcv, res = self.run_pair([Cable()], [f], c=cfg(retries=0))
+        self.assertEqual(res["s"]["state"], "done", res["s"]["error"])
+        self.assertTrue(same(f, os.path.join(self.dst, "big.bin")))
+        log = "\n".join(snd.log.lines)
+        self.assertIn("2/25 段不一致", log); self.assertNotIn("重新发送", log)
+        tx = sum(l["tx_bytes"] for l in res["s"]["links"])
+        self.assertLess(tx, 200_000 * 1.25)                                             # ~ the file once + two 8 KB segments, not twice
+        self.assertEqual(sorted(os.listdir(self.dst)), ["big.bin"])
+
+    def test_unrepairable_file_is_discarded_after_the_rounds(self):
+        self._flip_writes({5}, always=True)
+        f = os.path.join(self.src, "bad.bin"); make_file(f, 30_000, seed=13)
+        snd, rcv, res = self.run_pair([Cable()], [f], c=cfg(retries=0), wait=90)
+        self.assertIn("bad.bin", res["s"]["failed"])
+        self.assertEqual([x for x in os.listdir(self.dst) if x.endswith((PART, META))], [])   # nothing stale left to poison a resume
