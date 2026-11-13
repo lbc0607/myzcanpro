@@ -15,7 +15,8 @@ from .crc import CrcSpec, PRESETS
 
 FORMAT_VERSION = 1
 SIM_DEVICE = "模拟ECU(测试)"
-DEVICES = ["USBCANFD-200U", "USBCANFD-100U", "USBCANFD-MINI", "USBCANFD-400U", "USBCAN-II", SIM_DEVICE]
+NET_DEVICE = "虚拟总线(多进程)"      # several CanVDS processes on one PC joined by a loopback bus (zdiag/netbus.py)
+DEVICES = ["USBCANFD-200U", "USBCANFD-100U", "USBCANFD-MINI", "USBCANFD-400U", "USBCAN-II", SIM_DEVICE, NET_DEVICE]
 SUPPRESS_SIDS = {0x10, 0x11, 0x19, 0x27, 0x28, 0x31, 0x3E, 0x83, 0x85, 0x86, 0x87}
 
 

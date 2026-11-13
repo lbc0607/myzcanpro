@@ -13,7 +13,7 @@ from typing import Callable, Dict, List, Optional
 
 from .busstats import BusStats, ChannelCfg, CountingBus
 from .monitor import FrameTap
-from .project import DEVICES, SIM_DEVICE
+from .project import DEVICES, NET_DEVICE, SIM_DEVICE
 
 
 class ConnError(Exception):
@@ -29,7 +29,7 @@ def find_zlgcan(base: str, override: str = "") -> str:
 
 
 def channel_count(device: str) -> int:
-    if device == "USBCANFD-400U":
+    if device in ("USBCANFD-400U", NET_DEVICE):
         return 4
     if device in ("USBCANFD-100U", "USBCANFD-MINI"):      # 100U: 1 channel per usbcanfd-100u.xml; MINI assumed 1
         return 1
@@ -37,7 +37,7 @@ def channel_count(device: str) -> int:
 
 
 def is_fd_device(device: str) -> bool:
-    return device.startswith("USBCANFD") or device == SIM_DEVICE
+    return device.startswith("USBCANFD") or device in (SIM_DEVICE, NET_DEVICE)
 
 
 def has_terminator(device: str) -> bool:
@@ -46,7 +46,7 @@ def has_terminator(device: str) -> bool:
 
 
 def bitrate_choices_kbps(device: str) -> List[float]:
-    if device.startswith("USBCANFD") or device == SIM_DEVICE:
+    if device.startswith("USBCANFD") or device in (SIM_DEVICE, NET_DEVICE):
         return [1000, 800, 500, 250, 125, 100, 50, 20, 10, 5]
     return [1000, 800, 500, 250, 125, 100, 50, 20, 10]            # USBCAN-II timing table
 
@@ -116,7 +116,10 @@ class DeviceManager:
                 raise ConnError("设备已经打开")
             if name not in DEVICES:
                 raise ConnError(f"不支持的设备: {name}")
-            if name != SIM_DEVICE:
+            if name == NET_DEVICE:
+                from .netbus import NetDevice
+                self.device = NetDevice(name, index)
+            elif name != SIM_DEVICE:
                 self.device = self._open_zlg(name, index)
             self.name, self.index = name, index
         self._notify()
