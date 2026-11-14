@@ -218,6 +218,23 @@ class FileTransferOps(Base):
         with open(os.path.join(src, "a.bin"), "rb") as a, open(os.path.join(dst, "src_rc", "a.bin"), "rb") as b:
             self.assertEqual(a.read(), b.read())
 
+    def test_channels_ticked_while_running(self):
+        src = os.path.join(self.ctx.dir, "src_dyn"); dst = os.path.join(self.ctx.dir, "dst_dyn")
+        os.makedirs(src)
+        with open(os.path.join(src, "a.bin"), "wb") as f: f.write(os.urandom(2_500_000))
+        self.assertTrue(self.ops.ft_receive([2], dst)["started"]); self.assertTrue(self.ops.ft_send([0], [src])["started"])
+        end = time.time() + 20
+        while time.time() < end and (self.ops._ft["send"].engine.cur is None or self.ops._ft["send"].engine.cur.done_chunks() < 10): time.sleep(0.005)
+        self.assertEqual(len(self.ops._ft["send"].status()["links"]), 1)
+        self.ops.ft_channels("receive", [2, 3]); r = self.ops.ft_channels("send", [0, 1])
+        self.assertEqual(r["channels"], [0, 1])
+        self.assertEqual(len(self.ops._ft["send"].status()["links"]), 2)
+        with self.assertRaises(OpsError): self.ops.ft_channels("send", [0, 1, 2])
+        with self.assertRaises(OpsError): self.ops.ft_channels("receive", [])
+        st = self.wait("send", 60); self.wait("receive", 60)
+        self.assertEqual(st["state"], "done", st["error"])
+        self.assertGreater(st["links"][1]["tx_bytes"] if len(st["links"]) > 1 else 0, 0)
+
     def test_argument_errors_and_busy_channel(self):
         with self.assertRaises(OpsError): self.ops.ft_send([0], [])
         with self.assertRaises(OpsError): self.ops.ft_send([0, 0], [self.ctx.dir])

@@ -132,6 +132,7 @@ class FileTransferWindow(W.QWidget):
             b.setChecked(self._checked.get(n, len(self._boxes) < 1))
             self.box_row.addWidget(b)
             self._boxes[n] = b
+            b.toggled.connect(self._channels_changed)
         self.l_nochan.setVisible(not started)
 
     # ------------------------------------------------------------------ actions
@@ -154,6 +155,23 @@ class FileTransferWindow(W.QWidget):
         d = W.QFileDialog.getExistingDirectory(self, "选择保存文件夹", self.e_dest.text().strip() or self.ctx.last_dir)
         if d:
             self.e_dest.setText(d)
+
+    def _channels_changed(self) -> None:
+        """Ticking / unticking a channel while the transfer runs takes effect at once (the other end does the same on its side)."""
+        job = self.ops._ft.get(self.role)
+        if job is None or not job.running():
+            return
+        chans = self.selected_channels()
+        try:
+            if not chans or len(chans) > 2:
+                raise OpsError("传输中请保持选择 1~2 个通道。")
+            self.ops.ft_channels(self.role, chans)
+        except OpsError as e:
+            warn(self, str(e))
+            for n, b in self._boxes.items():                               # back to what the job really uses
+                b.blockSignals(True)
+                b.setChecked(n in job.channels)
+                b.blockSignals(False)
 
     def selected_channels(self) -> List[int]:
         return [n for n, b in self._boxes.items() if b.isChecked()]

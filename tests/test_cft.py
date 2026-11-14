@@ -483,3 +483,26 @@ class Reconnect(Base):
         t0 = time.time()
         r = snd.run([f])
         self.assertEqual(r["state"], "error"); self.assertLess(time.time() - t0, 15)
+
+
+class DynamicLinks(Reconnect):
+    def test_channel_ticked_during_the_transfer_joins_and_unticked_leaves(self):
+        c0, c1 = Cable(1), Cable(2)
+        s0, r0, s1, r1 = Device(c0.s), Device(c0.r), Device(c1.s), Device(c1.r)
+        c = cfg(persist=True, watch_ms=50)
+        snd, rcv = self.pair(c, [s0], [r0])                                   # started with ONE channel on both ends
+        f = os.path.join(self.src, "d.bin"); make_file(f, 4_000_000, seed=9)
+        added = {}
+
+        def hook():
+            self.assertTrue(self.wait_progress(snd, 20))
+            added["s"], added["r"] = s1.link(0, c, "S1"), r1.link(0, c, "R1")
+            rcv.add_link(added["r"]); snd.add_link(added["s"])               # both ends tick the second channel
+            self.assertEqual(added["s"].idx, 1)
+            time.sleep(1.5)
+            self.assertGreater(added["s"].tx_bytes, 0)                        # the new link really carries data now
+            snd.remove_link(snd.links[0]); rcv.remove_link(rcv.links[0])     # first channel unticked on both ends
+            self.assertEqual(len([l for l in snd.status()["links"]]), 1)
+        res = self.go(snd, rcv, [f], hook)
+        self.assertEqual(res["s"]["state"], "done", res["s"]["error"])
+        self.assertTrue(same(f, os.path.join(self.dst, "d.bin")))

@@ -835,18 +835,24 @@ class Ops:
                 return bus, fd, brs
             return provider
 
+        by_ch: Dict[int, Any] = {}
+
+        def new_link(ch: int, idx: int):
+            l = cftmod.Link(idx, None, False, False, cfg, f"通道{ch}")
+            l.provider = mk_provider(ch)
+            l.validator = (lambda b, ch=ch: self._ft_valid(ch, b))
+            l.on_attach = (lambda lk, up, ch=ch: None if up else let_go(ch))
+            got = l.provider()
+            if got:
+                l.attach(*got)
+            elif not cfg.persist:
+                raise OpsError(f"通道{ch} 还没有打开：请先打开设备并启动该通道")
+            by_ch[ch] = l
+            return l
+
         try:
             for i, ch in enumerate(chans):
-                l = cftmod.Link(i, None, False, False, cfg, f"通道{ch}")
-                l.provider = mk_provider(ch)
-                l.validator = (lambda b, ch=ch: self._ft_valid(ch, b))
-                l.on_attach = (lambda lk, up, ch=ch: None if up else let_go(ch))
-                got = l.provider()
-                if got:
-                    l.attach(*got)
-                elif not cfg.persist:
-                    raise OpsError(f"通道{ch} 还没有打开：请先打开设备并启动该通道")
-                links.append(l)
+                links.append(new_link(ch, i))
             engine = make(links)
         except Exception as e:
             for ch in chans:
@@ -860,12 +866,38 @@ class Ops:
                 let_go(ch)
         job = cftmod.CftJob(engine, engine._runner, done)
         job.channels = chans
+
+        def retarget(new: List[int]) -> Dict[str, Any]:
+            """Change the channel set of the RUNNING job: new ones join at once (waiting until open), removed ones leave."""
+            with self.lock:
+                busy = {c for r, j in self._ft.items() if j is not job and j.running() for c in j.channels}
+            if busy & set(new):
+                raise OpsError(f"通道 {sorted(busy & set(new))} 正被另一个文件传输使用")
+            for ch in [c for c in job.channels if c not in new]:
+                engine.remove_link(by_ch.pop(ch))
+            for ch in [c for c in new if c not in job.channels]:
+                engine.add_link(new_link(ch, len(engine.links)))
+            job.channels[:] = list(new)
+            return {"channels": list(job.channels), "waiting_channels": [c for c in job.channels if not by_ch[c].attached]}
+        job.retarget = retarget
         with self.lock:
             self._ft[role] = job
         job.start()
         waiting = [c for c, l in zip(chans, links) if not l.attached]
         return {"started": True, "role": role, "channels": chans, "waiting_channels": waiting,
                 "message": "已开始，用 ft_status 查看进度" + (f"；通道 {waiting} 还没打开，打开后会自动连接" if waiting else "")}
+
+    def ft_channels(self, role: str, channels: List[int]) -> Dict[str, Any]:
+        """Change the channels of a running file transfer (role 'send' / 'receive') without stopping it: newly listed channels join
+        immediately (waiting until they are open), channels left out are released.  Do the same on both ends to use more channels."""
+        new = [int(c) for c in (channels if isinstance(channels, (list, tuple)) else [channels])]
+        if not new or len(set(new)) != len(new) or len(new) > 2:
+            raise OpsError("channels 需要 1~2 个不重复的通道号")
+        with self.lock:
+            job = self._ft.get(role)
+        if job is None or not job.running():
+            raise OpsError(f"没有正在进行的 {role} 传输")
+        return job.retarget(new)
 
     def ft_send(self, channels: List[int], paths: List[str], base_id: str = "6A0", chunk_bytes: int = 1024, window: int = 128,
                 fd_frame_len: int = 64, extended: bool = False, link_timeout_ms: int = 600, idle_timeout_s: int = 30,

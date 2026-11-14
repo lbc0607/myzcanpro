@@ -121,6 +121,7 @@ class Link:
         self.provider: Optional[Callable[[], Optional[Tuple[Bus, bool, bool]]]] = None   # returns a freshly opened (bus, fd, brs) or None
         self.validator: Optional[Callable[[Bus], bool]] = None                          # False when `bus` is no longer usable
         self.attaches = 0
+        self.closed = False                                      # taken out of the job (channel unticked): inert for good
         self.tx_calls = 0                                         # driver transmit calls (frames/calls = batching factor)
         self.last_attach = 0.0
         self.on_attach: Optional[Callable[["Link", bool], None]] = None
@@ -154,6 +155,8 @@ class Link:
         return True
 
     def attach(self, bus: Bus, fd: bool, brs: bool) -> None:
+        if self.closed:
+            return
         self.fd, self.brs = bool(fd), bool(brs)
         self.frame_len = self.cfg.fd_frame_len if self.fd else 8
         self.backoff, self._err_mark = 0.0, 0
@@ -163,8 +166,15 @@ class Link:
         if self.on_attach:
             self.on_attach(self, True)
 
+    def close(self) -> None:
+        self.closed = True
+        self.provider = None
+        self.detach("通道已取消")
+
     def poll(self) -> None:
         """Supervisor tick: drop a bus that stopped being valid, try to obtain one while detached."""
+        if self.closed:
+            return
         b = self.bus
         if b is not None:
             try:
@@ -292,7 +302,7 @@ class Link:
 def _recv(l: Link):
     """One frame from the link's bus; None when nothing arrived or the channel is gone (never raises)."""
     b = l.bus
-    if b is None:
+    if b is None or l.closed:
         time.sleep(0.05)
         return None
     try:
@@ -578,6 +588,7 @@ class Sender:
         self.started = 0.0
         self._speed: Deque[Tuple[float, int]] = collections.deque(maxlen=200)
         self._threads: List[threading.Thread] = []
+        self._spawned = False
         for l in links:
             l.on_change = self._link_changed
 
@@ -606,7 +617,7 @@ class Sender:
                 "files_total": len([e for e in self.entries if e["kind"] == F_FILE]), "files_done": self.files_done,
                 "files_skipped": self.files_skipped, "failed": list(self.failed), "bytes_total": self.bytes_total,
                 "bytes_done": done, "speed_bps": round(speed), "elapsed_s": round(time.time() - self.started, 1) if self.started else 0,
-                "links": [self._link_info(l) for l in self.links]}
+                "links": [self._link_info(l) for l in self.links if not l.closed]}
 
     @staticmethod
     def _link_info(l: Link) -> Dict[str, Any]:
@@ -670,12 +681,34 @@ class Sender:
                 self.cur.close()
         return self.status()
 
+    def _spawn(self, l: Link) -> None:
+        for target in (self._rx_loop, self._worker):
+            t = threading.Thread(target=target, args=(l,), daemon=True, name=f"cft-{target.__name__}-{l.idx}")
+            t.start()
+            self._threads.append(t)
+
+    def add_link(self, l: Link) -> None:
+        """A channel was ticked while the transfer is running: it joins at once (the job keeps going on the other links)."""
+        l.idx = max([x.idx for x in self.links] + [-1]) + 1
+        l.on_change = self._link_changed
+        self.links.append(l)                                         # same list object the Messenger / supervisor iterate
+        if self._spawned:
+            self._spawn(l)
+        self.log(f"{l.name} 已加入传输")
+
+    def remove_link(self, l: Link) -> None:
+        l.close()
+        with self.cond:
+            for c, rec in list(self.cur.inflight.items()) if self.cur is not None else []:
+                if rec[0] == l.idx:
+                    self.cur.requeue(c)
+            self.cond.notify_all()
+        self.log(f"{l.name} 已退出传输")
+
     def _start(self) -> None:
-        for l in self.links:
-            for target in (self._rx_loop, self._worker):
-                t = threading.Thread(target=target, args=(l,), daemon=True, name=f"cft-{target.__name__}-{l.idx}")
-                t.start()
-                self._threads.append(t)
+        self._spawned = True
+        for l in list(self.links):
+            self._spawn(l)
         t = threading.Thread(target=self._hb_loop, daemon=True, name="cft-hb")
         t.start()
         self._threads.append(t)
@@ -698,7 +731,7 @@ class Sender:
 
     # ------------------------------------------------------------ rx / heartbeat
     def _rx_loop(self, l: Link) -> None:
-        while not self.stop_ev.is_set():
+        while not self.stop_ev.is_set() and not l.closed:
             fr = _recv(l)
             if fr is None or fr.rtr or fr.can_id != self.cfg.id_r2s or not fr.data:
                 continue
@@ -789,7 +822,7 @@ class Sender:
         return fs, idx, rec
 
     def _worker(self, l: Link) -> None:
-        while not self.stop_ev.is_set():
+        while not self.stop_ev.is_set() and not l.closed:
             with self.cond:
                 job = self._take(l)
                 if job is None:
@@ -1048,6 +1081,7 @@ class Receiver:
         self.cfg = cfg or CftConfig()
         self.cfg.validate()
         self.links, self.dest, self.once = links, os.path.abspath(dest), once
+        self._spawned = False
         self.stop_ev = threading.Event()
         self.log = _Log()
         self.msg = Messenger(links, self.cfg.id_r2s, self.stop_ev, lambda l: time.monotonic() - l.last_rx < 2.0 and l.last_rx > 0,
@@ -1090,18 +1124,33 @@ class Receiver:
                 "elapsed_s": round(time.time() - self.started, 1) if self.started else 0,
                 "links": [{"name": l.name, "alive": time.monotonic() - l.last_rx < 2.0 and l.last_rx > 0, "frame_len": l.frame_len,
                            "fd": l.fd, "attached": l.attached, "attaches": l.attaches, "tx_frames": l.tx_frames,
-                           "rx_frames": l.rx_frames, "errors": l.errors, "bus_errors": l.bus_errors(), "health": l.health()} for l in self.links],
+                           "rx_frames": l.rx_frames, "errors": l.errors, "bus_errors": l.bus_errors(), "health": l.health()} for l in self.links if not l.closed],
                 "bad_chunks": self.bad_total}
 
     # ------------------------------------------------------------ run
+    def _spawn(self, l: Link) -> None:
+        t = threading.Thread(target=self._rx_loop, args=(l,), daemon=True, name=f"cft-rrx-{l.idx}")
+        t.start()
+        self._threads.append(t)
+
+    def add_link(self, l: Link) -> None:
+        l.idx = max([x.idx for x in self.links] + [-1]) + 1
+        self.links.append(l)
+        if self._spawned:
+            self._spawn(l)
+        self.log(f"{l.name} 已加入传输")
+
+    def remove_link(self, l: Link) -> None:
+        l.close()
+        self.log(f"{l.name} 已退出传输")
+
     def run(self) -> Dict[str, Any]:
         self.started = time.time()
         os.makedirs(self.dest, exist_ok=True)
         self.log(f"开始接收，保存到 {self.dest}，{len(self.links)} 条链路，CAN ID {self.cfg.base_id:X}/{self.cfg.base_id + 1:X}/{self.cfg.base_id + 2:X}")
-        for l in self.links:
-            t = threading.Thread(target=self._rx_loop, args=(l,), daemon=True, name=f"cft-rrx-{l.idx}")
-            t.start()
-            self._threads.append(t)
+        self._spawned = True
+        for l in list(self.links):
+            self._spawn(l)
         t = threading.Thread(target=self._status_loop, daemon=True, name="cft-status")
         t.start()
         self._threads.append(t)
@@ -1149,7 +1198,7 @@ class Receiver:
 
     # ------------------------------------------------------------ frames
     def _rx_loop(self, l: Link) -> None:
-        while not self.stop_ev.is_set():
+        while not self.stop_ev.is_set() and not l.closed:
             fr = _recv(l)
             if fr is None or fr.rtr or not fr.data:
                 continue
