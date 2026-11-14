@@ -568,8 +568,8 @@ class Sender:
         self.cfg.validate()
         self.links = links
         for l in links:
-            if l.attached and self.cfg.chunk_bytes > 256 * l.payload:
-                raise CftError(f"块大小 {self.cfg.chunk_bytes} 超过 {l.name} 的上限 {256 * l.payload}（每块最多 256 帧）")
+            if l.attached and self.cfg.chunk_bytes + CRC_LEN > 256 * l.payload:
+                raise CftError(f"块大小 {self.cfg.chunk_bytes} 超过 {l.name} 的上限 {256 * l.payload - CRC_LEN}（每块含 CRC 最多 256 帧）")
         self.stop_ev = threading.Event()
         self.cond = threading.Condition()
         self.log = _Log()
