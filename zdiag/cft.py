@@ -121,6 +121,7 @@ class Link:
         self.provider: Optional[Callable[[], Optional[Tuple[Bus, bool, bool]]]] = None   # returns a freshly opened (bus, fd, brs) or None
         self.validator: Optional[Callable[[Bus], bool]] = None                          # False when `bus` is no longer usable
         self.attaches = 0
+        self.tx_calls = 0                                         # driver transmit calls (frames/calls = batching factor)
         self.last_attach = 0.0
         self.on_attach: Optional[Callable[["Link", bool], None]] = None
 
@@ -200,6 +201,7 @@ class Link:
             try:
                 with self.lock:
                     bus.send(fr)
+                self.tx_calls += 1
                 self.tx_frames += 1
                 self.tx_bytes += len(data)
                 return
@@ -208,6 +210,43 @@ class Link:
                 self.errors += 1
                 time.sleep(0.002)
         raise LinkError(f"{self.name} 发送失败: {err}")
+
+    def send_many(self, can_id: int, datas: List[bytes]) -> None:
+        """Send several frames in order through ONE driver call where the device supports it (Bus.send_many); the driver may take only a
+        prefix when its TX buffer is full, the rest is retried.  Same failure rule as send(): LinkError after 100 attempts without progress."""
+        if self.backoff > 0:                                      # error storm: pace frame by frame
+            for d in datas:
+                self.send(can_id, d)
+            return
+        frs = []
+        for data in datas:
+            if len(data) > self.frame_len:
+                raise ValueError("frame too long")
+            if self.fd:
+                data = data.ljust(dlc_len(len(data)), b"\x00")
+            frs.append(CanFrame(can_id, bytes(data), self.cfg.extended, self.fd, self.brs))
+        i, fails, err = 0, 0, None
+        while i < len(frs):
+            bus = self.bus
+            if bus is None:
+                raise LinkError(f"{self.name} 通道未打开")
+            try:
+                with self.lock:
+                    k = bus.send_many(frs[i:])
+                self.tx_calls += 1
+            except Exception as e:
+                err, k = e, 0
+            if k > 0:
+                self.tx_frames += k
+                self.tx_bytes += sum(len(f.data) for f in frs[i:i + k])
+                i += k
+                fails = 0
+                continue
+            self.errors += 1
+            fails += 1
+            if fails >= 100:
+                raise LinkError(f"{self.name} 发送失败: {err or '发送缓冲区满'}")
+            time.sleep(0.002)
 
     def bus_errors(self) -> int:
         st = getattr(self.bus, "stats", None) if self.bus is not None else None
@@ -571,7 +610,7 @@ class Sender:
 
     @staticmethod
     def _link_info(l: Link) -> Dict[str, Any]:
-        return {"name": l.name, "alive": l.alive, "attached": l.attached, "attaches": l.attaches, "frame_len": l.frame_len, "fd": l.fd, "tx_frames": l.tx_frames,
+        return {"name": l.name, "alive": l.alive, "attached": l.attached, "attaches": l.attaches, "tx_calls": l.tx_calls, "frame_len": l.frame_len, "fd": l.fd, "tx_frames": l.tx_frames,
                 "tx_bytes": l.tx_bytes, "errors": l.errors, "downs": l.downs, "bus_errors": l.bus_errors(),
                 "backoff_ms": round(l.backoff * 1000), "health": l.health()}
 
@@ -762,9 +801,8 @@ class Sender:
                 data += struct.pack(">I", zlib.crc32(data) & 0xFFFFFFFF)
                 p = l.payload
                 head = bytes((fs.epoch, idx & 0xFF))
-                for fi in range(max(1, (len(data) + p - 1) // p)):
-                    part = data[fi * p:(fi + 1) * p]
-                    l.send(self.cfg.id_data, head + bytes((fi,)) + part.ljust(p, b"\x00"))
+                l.send_many(self.cfg.id_data, [head + bytes((fi,)) + data[fi * p:(fi + 1) * p].ljust(p, b"\x00")
+                                               for fi in range(max(1, (len(data) + p - 1) // p))])
                 with self.cond:
                     if fs.inflight.get(idx) is rec:
                         rec[1] = time.monotonic()

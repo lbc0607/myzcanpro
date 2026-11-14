@@ -25,6 +25,20 @@ class Bus(ABC):
     @abstractmethod
     def send(self, frame: CanFrame) -> None: ...
 
+    def send_many(self, frames: list) -> int:
+        """Transmit several frames in order; returns how many were accepted (a prefix of `frames`; may be fewer than asked when the
+        device TX buffer is full).  Raises only when not even the first one could be sent.  Devices override this with a real batch call."""
+        n = 0
+        for fr in frames:
+            try:
+                self.send(fr)
+            except Exception:
+                if n == 0:
+                    raise
+                break
+            n += 1
+        return n
+
     @abstractmethod
     def recv(self, timeout: float) -> Optional[CanFrame]: ...
 

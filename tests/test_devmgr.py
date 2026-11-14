@@ -219,6 +219,58 @@ class ZlgInitSequenceTests(unittest.TestCase):
         c = ChannelCfg(protocol="CAN FD", fd_accel=False, data_kbps=100); c.validate()       # data rate unused -> not checked
         self.assertEqual((c.data_bitrate, c.brs, c.summary()), (500000, False, "CAN FD 500k 不加速"))
 
+    def test_send_many_batches_fd_and_classic_in_single_driver_calls(self):
+        from zdiag.bus import CanFrame
+        calls = []
+
+        def fd(chn, arr, n):
+            calls.append(("fd", n, [arr[i].frame.can_id for i in range(n)], [arr[i].frame.len for i in range(n)], arr[0].frame.flags))
+            return n
+
+        def classic(chn, arr, n):
+            calls.append(("can", n, [arr[i].frame.can_id for i in range(n)], [arr[i].frame.can_dlc for i in range(n)]))
+            return n
+        d = self.make("USBCANFD-200U")
+        d.lib.ZCAN_TransmitFD, d.lib.ZCAN_Transmit = fd, classic
+        bus = d.start_channel(0, ChannelCfg(protocol="CAN FD", bitrate_kbps=500, data_kbps=2000))
+        frs = [CanFrame(0x6A2, bytes([i]) * 64, False, True, True) for i in range(17)]
+        self.assertEqual(bus.send_many(frs), 17)
+        self.assertEqual([(c[0], c[1]) for c in calls], [("fd", 17)])                       # 17 frames, ONE call
+        self.assertEqual(set(calls[0][3]), {64}); self.assertEqual(calls[0][4], 1)          # data length kept, BRS on
+        calls.clear()
+        mixed = [CanFrame(1, b"ab", False, False, False), CanFrame(2, b"cd", False, False, False), CanFrame(3, bytes(12), False, True, True),
+                 CanFrame(4, b"x", False, False, False)]
+        self.assertEqual(bus.send_many(mixed), 4)
+        self.assertEqual([(c[0], c[1]) for c in calls], [("can", 2), ("fd", 1), ("can", 1)])  # order kept, runs batched per kind
+        self.assertEqual(calls[0][2], [1, 2]); self.assertEqual(calls[0][3], [2, 2])
+        calls.clear()
+        d.lib.ZCAN_TransmitFD = lambda chn, arr, n: min(n, 5)                                # TX buffer takes only 5
+        self.assertEqual(bus.send_many(frs), 5)                                              # a prefix: the caller retries the rest
+        d.lib.ZCAN_TransmitFD = lambda chn, arr, n: 0
+        with self.assertRaises(Exception): bus.send_many(frs)                                # nothing accepted -> error
+        self.assertEqual(bus.stats.snapshot()[1], 17 + 4 + 5)
+
+    def test_link_send_many_retries_the_unsent_tail(self):
+        from zdiag.bus import Bus, CanFrame
+        from zdiag.cft import CftConfig, Link, LinkError
+
+        class Slow(Bus):
+            def __init__(self): self.got, self.n = [], 0
+            def send(self, fr): raise AssertionError
+            def send_many(self, frames):
+                self.n += 1
+                if self.n % 2: return 0                                                      # full every other call
+                k = min(3, len(frames)); self.got += [f.data[0] for f in frames[:k]]; return k
+            def recv(self, t): return None
+            def flush(self): pass
+        b = Slow(); l = Link(0, b, True, True, CftConfig(), "x")
+        l.send_many(0x6A2, [bytes([i]) * 10 for i in range(10)])
+        self.assertEqual(b.got, list(range(10))); self.assertEqual(l.tx_frames, 10)         # all, in order, once each
+
+        class Dead(Slow):
+            def send_many(self, frames): return 0
+        with self.assertRaises(LinkError): Link(0, Dead(), True, True, CftConfig(), "y").send_many(1, [b"a"])
+
     def test_fd_device_fd_mode(self):
         d = self.make("USBCANFD-200U")
         bus = d.start_channel(1, ChannelCfg(protocol="CAN FD", bitrate_kbps=500, data_kbps=2000, terminator=True))

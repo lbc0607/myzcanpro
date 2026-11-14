@@ -406,6 +406,60 @@ class ZlgBus(Bus):
         if self.tap is not None:
             self.tap.feed(self.channel, fr, "TX")
 
+    SEND_BATCH = 128                                               # frames handed to one ZCAN_Transmit / ZCAN_TransmitFD call
+
+    def send_many(self, frames: list) -> int:
+        """Batch transmit: consecutive frames of the same kind (CAN FD / classic CAN) go to the driver in ONE ZCAN_TransmitFD /
+        ZCAN_Transmit call; the driver reports how many it took (the TX buffer may fill up), we return that count (a prefix)."""
+        if self.cfg.listen_only:
+            raise ZlgError("通道处于只听模式，不能发送")
+        L, total, i, n = self.lib, 0, 0, len(frames)
+        while i < n:
+            fd = bool(frames[i].fd and self.use_fd)
+            j = i
+            while j < n and j - i < self.SEND_BATCH and bool(frames[j].fd and self.use_fd) == fd:
+                j += 1
+            run = frames[i:j]
+            if fd:
+                arr = (ZCAN_TransmitFD_Data * len(run))()
+                for k, fr in enumerate(run):
+                    t = arr[k]
+                    t.transmit_type = 0
+                    t.frame.can_id = fr.can_id
+                    t.frame.eff = 1 if fr.extended else 0
+                    data = fr.data.ljust(_dlc_len(len(fr.data)), b"\x00")
+                    t.frame.len = len(data)
+                    t.frame.flags = 1 if (fr.brs and self.cfg.fd_accel) else 0
+                    C.memmove(t.frame.data, data, len(data))
+                ok = int(L.ZCAN_TransmitFD(self.chn, arr, len(run)))
+            else:
+                if any(len(fr.data) > 8 for fr in run):
+                    raise ZlgError("classic CAN frame > 8 bytes")
+                arr = (ZCAN_Transmit_Data * len(run))()
+                for k, fr in enumerate(run):
+                    t = arr[k]
+                    t.transmit_type = 0
+                    t.frame.can_id = fr.can_id
+                    t.frame.eff = 1 if fr.extended else 0
+                    t.frame.rtr = 1 if fr.rtr else 0
+                    t.frame.can_dlc = len(fr.data)
+                    C.memmove(t.frame.data, fr.data, len(fr.data))
+                ok = int(L.ZCAN_Transmit(self.chn, arr, len(run)))
+            ok = max(0, min(ok, len(run)))
+            for fr in run[:ok]:
+                self.stats.count_tx(fr)
+                if self.tap is not None:
+                    self.tap.feed(self.channel, fr, "TX")
+            total += ok
+            if ok < len(run):                                      # buffer full / bus problem: report what went out
+                if total == 0:
+                    self.stats.count_err()
+                    self._on_error_frame()
+                    raise ZlgError("发送失败(总线关闭/发送缓冲满/无应答?)")
+                break
+            i = j
+        return total
+
     def recv(self, timeout: float) -> Optional[CanFrame]:
         try:
             return self._q.get(timeout=max(timeout, 0))
