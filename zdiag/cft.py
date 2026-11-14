@@ -235,7 +235,7 @@ class Link:
             if self.fd:
                 data = data.ljust(dlc_len(len(data)), b"\x00")
             frs.append(CanFrame(can_id, bytes(data), self.cfg.extended, self.fd, self.brs))
-        i, fails, err = 0, 0, None
+        i, err, t_ok = 0, None, time.monotonic()
         while i < len(frs):
             bus = self.bus
             if bus is None:
@@ -250,13 +250,12 @@ class Link:
                 self.tx_frames += k
                 self.tx_bytes += sum(len(f.data) for f in frs[i:i + k])
                 i += k
-                fails = 0
+                t_ok = time.monotonic()
                 continue
             self.errors += 1
-            fails += 1
-            if fails >= 100:
+            if time.monotonic() - t_ok > 1.0:                     # not a single frame accepted for a second
                 raise LinkError(f"{self.name} 发送失败: {err or '发送缓冲区满'}")
-            time.sleep(0.002)
+            time.sleep(0.0005)                                    # TX buffer full: poll quickly so it never runs dry (needs a 1 ms OS timer, see hires_timer)
 
     def bus_errors(self) -> int:
         st = getattr(self.bus, "stats", None) if self.bus is not None else None

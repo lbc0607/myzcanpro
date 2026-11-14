@@ -14,6 +14,7 @@ import collections
 import ctypes as C
 import os
 import queue
+import sys
 import threading
 import time
 from typing import Optional, Union
@@ -119,6 +120,31 @@ def supported_bitrates_kbps(device: str):
     return [1000, 800, 500, 250, 125, 100, 50, 20, 10, 5]
 
 
+_hires_n = 0
+_hires_lock = threading.Lock()
+
+
+def hires_timer(on: bool) -> None:
+    """Windows: ask for 1 ms timer resolution while a device is open.  The default (~15.6 ms; Python < 3.11 sleeps that coarsely) turns every
+    time.sleep(0.0005) in the TX/RX paths into a 15 ms gap, which leaves the bus idle although frames are waiting.  No-op elsewhere."""
+    global _hires_n
+    if not sys.platform.startswith("win"):
+        return
+    with _hires_lock:
+        try:
+            winmm = C.windll.winmm
+            if on:
+                _hires_n += 1
+                if _hires_n == 1:
+                    winmm.timeBeginPeriod(1)
+            elif _hires_n > 0:
+                _hires_n -= 1
+                if _hires_n == 0:
+                    winmm.timeEndPeriod(1)
+        except Exception:
+            pass
+
+
 class ZlgDevice:
     """One opened physical device (ZCAN_OpenDevice); channels are started on it individually."""
 
@@ -155,6 +181,7 @@ class ZlgDevice:
             raise ZlgError("ZCAN_OpenDevice 失败：请检查设备是否插好、驱动是否安装、kerneldlls 是否在 zlgcan.dll 旁边、"
                            "是否为 32 位 Python、设备索引是否正确。")
         self.buses: dict = {}
+        hires_timer(True)
 
     def set_value(self, path: str, value) -> None:
         if self.lib.ZCAN_SetValue(self.handle, path.encode(), str(value).encode()) != STATUS_OK:
@@ -180,6 +207,7 @@ class ZlgDevice:
         if self.handle:
             self.lib.ZCAN_CloseDevice(self.handle)
             self.handle = None
+            hires_timer(False)
 
 
 class ZCAN_CHANNEL_ERR_INFO(C.Structure):
