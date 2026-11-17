@@ -285,7 +285,7 @@ class LauncherWindow(W.QMainWindow):
         self.c_device.setEnabled(not opened)
         self.s_index.setEnabled(not opened)
         self.l_dev_state.setText(f"已打开: {dev.name} #{dev.index}" if opened else "设备未打开")
-        want = channel_count(dev.name) if opened else 0
+        want = dev.channel_total() if opened else 0
         while len(self.panels) < want:
             p = ChannelPanel(len(self.panels))
             p.b_toggle.clicked.connect(lambda _=False, n=p.n: self._toggle_channel(n))

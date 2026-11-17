@@ -13,7 +13,7 @@ from typing import Callable, Dict, List, Optional
 
 from .busstats import BusStats, ChannelCfg, CountingBus
 from .monitor import FrameTap
-from .project import DEVICES, NET_DEVICE, SIM_DEVICE
+from .project import DEVICES, GS_DEVICE, NET_DEVICE, SIM_DEVICE
 
 
 class ConnError(Exception):
@@ -31,22 +31,29 @@ def find_zlgcan(base: str, override: str = "") -> str:
 def channel_count(device: str) -> int:
     if device in ("USBCANFD-400U", NET_DEVICE):
         return 4
+    if device == GS_DEVICE:                                  # real count comes from the opened device (DeviceManager.channel_total)
+        return 1
     if device in ("USBCANFD-100U", "USBCANFD-MINI"):      # 100U: 1 channel per usbcanfd-100u.xml; MINI assumed 1
         return 1
     return 2
 
 
 def is_fd_device(device: str) -> bool:
-    return device.startswith("USBCANFD") or device in (SIM_DEVICE, NET_DEVICE)
+    return device.startswith("USBCANFD") or device in (SIM_DEVICE, NET_DEVICE, GS_DEVICE)
 
 
 def has_terminator(device: str) -> bool:
-    """Software-switchable termination resistor (only the FD devices have it)."""
-    return device.startswith("USBCANFD")
+    """Software-switchable termination resistor (the ZLG FD devices; gs_usb: depends on the firmware, tried and noted when missing)."""
+    return device.startswith("USBCANFD") or device == GS_DEVICE
+
+
+def has_sample_point(device: str) -> bool:
+    """The host computes the bit timing itself (gs_usb) so the sample point can be chosen; ZLG devices do it inside the driver."""
+    return device == GS_DEVICE
 
 
 def bitrate_choices_kbps(device: str) -> List[float]:
-    if device.startswith("USBCANFD") or device in (SIM_DEVICE, NET_DEVICE):
+    if device.startswith("USBCANFD") or device in (SIM_DEVICE, NET_DEVICE, GS_DEVICE):
         return [1000, 800, 500, 250, 125, 100, 50, 20, 10, 5]
     return [1000, 800, 500, 250, 125, 100, 50, 20, 10]            # USBCAN-II timing table
 
@@ -119,6 +126,8 @@ class DeviceManager:
             if name == NET_DEVICE:
                 from .netbus import NetDevice
                 self.device = NetDevice(name, index)
+            elif name == GS_DEVICE:
+                self.device = self._open_gs(name, index)
             elif name != SIM_DEVICE:
                 self.device = self._open_zlg(name, index)
             self.name, self.index = name, index
@@ -134,6 +143,18 @@ class DeviceManager:
             return ZlgDevice(dll, name, index)
         except Exception as e:
             raise ConnError(f"打开设备失败: {e}")
+
+    def _open_gs(self, name: str, index: int):
+        try:
+            from .gsusb import GsUsbDevice
+            return GsUsbDevice(name, index, self.dll_dir)
+        except Exception as e:
+            raise ConnError(f"打开设备失败: {e}")
+
+    def channel_total(self) -> int:
+        """Number of channels of the opened device (gs_usb reports it; the others are fixed per model)."""
+        n = getattr(self.device, "channels", None)
+        return n if isinstance(n, int) else channel_count(self.name or "")
 
     def abort_users(self, channels=None) -> List[object]:
         """Tell whoever uses these channels (all when None) to stop NOW and take the channels away from them.
@@ -190,7 +211,7 @@ class DeviceManager:
         with self._lock:
             if not self.is_open:
                 raise ConnError("请先打开设备")
-            if not 0 <= n < channel_count(self.name):
+            if not 0 <= n < self.channel_total():
                 raise ConnError(f"该设备没有通道{n}")
             if n in self.chans:
                 raise ConnError(f"通道{n} 已经启动")

@@ -118,6 +118,10 @@ class FileTransferWindow(W.QWidget):
         self.g_recv.setVisible(self.role == "receive")
         self.b_start.setText("开始发送" if self.role == "send" else "开始接收")
 
+    def _total(self) -> int:
+        fn = getattr(self.ctx.dev, "channel_total", None)
+        return fn() if callable(fn) else channel_count(getattr(self.ctx.dev, "name", "") or "")
+
     def _on_dev_change(self) -> None:
         for n, b in self._boxes.items():
             self._checked[n] = b.isChecked()
@@ -126,7 +130,7 @@ class FileTransferWindow(W.QWidget):
             b.setParent(None)
         self._boxes = {}
         started = self.ctx.dev.started()
-        for n in sorted(set(started) | set(range(channel_count(getattr(self.ctx.dev, "name", "") or "")))):
+        for n in sorted(set(started) | set(range(self._total()))):
             c = self.ctx.dev.cfg_of(n)
             b = W.QCheckBox(f"通道{n} ({c.summary()})" if c else f"通道{n} (未启动)")
             b.setChecked(self._checked.get(n, len(self._boxes) < 1))

@@ -142,3 +142,13 @@ UDS over LIN：传输层为 NAD + PCI，主请求帧 0x3C / 从应答帧 0x3D（
 - **安全**：接收端拒绝绝对路径、`..`、盘符等越出保存目录的路径，磁盘空间不足会拒绝，`.cftpart/.cftmeta` 不接收。
 - **同一台设备自测**：用线把通道 0 和通道 1 连起来，agent 可以同时 `ft_receive([1], 目录)` 和 `ft_send([0], 路径)`（同一程序里发送和接收各一个任务）。
 - 代码：`zdiag/cft.py`（协议与收发引擎）、`zdiag/ops.py` 的 `ft_*`、`zdiag_ui/ft_window.py`。现状：在内存虚拟总线上验证（含丢帧、中途断开一条链路并恢复、断点续传、文件夹），**还没有在真实 CAN 盒子上跑过**；真机上建议先小文件、单通道试通，再上双通道。
+
+## gs_usb / Candlelight 适配器（CANable 2.0 等）
+
+设备下拉框选 `gs_usb(CANable/Candlelight)`。适配器需刷 Candlelight 固件（设备管理器里显示 "CAN FD Interface"，硬件 ID `VID_1D50&PID_606F`），无需安装驱动（WinUSB）。
+
+* 依赖：`python -m pip install pyusb`，并把 **32 位** `libusb-1.0.dll` 放到程序目录（或 `vendor\`），打包时 `vendor\` 会整体复制。
+* 位时序由上位机按设备时钟（G431 为 160 MHz）计算，必须能精确整除；通道设置里可选采样点（默认：≤500k 87.5%，≤800k 80%，更高 75%）。
+* 先用探测工具确认：`python tools\gsusb_probe.py`（只读，不发帧）；`--loop` 做控制器内部自环测速；`--loop --pack 4` 测试固件是否支持一次 USB 写多帧。
+* 环境变量：`CANVDS_GS_TXWIN`（在途帧窗口，默认 32）、`CANVDS_GS_PACK`（每次 USB 写入的帧数，默认 1）。
+* 终端电阻、总线错误上报、硬件时间戳是否可用取决于固件，不支持时在通道事件里提示。

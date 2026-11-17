@@ -18,6 +18,8 @@ class ChannelCfg:
     terminator: bool = True
     calc_load: bool = True
     load_interval_ms: int = 200
+    sample_pct: float = 0.0          # sample point of the arbitration phase in %; 0 = automatic (gs_usb devices only; ZLG sets its own)
+    data_sample_pct: float = 0.0     # sample point of the CAN FD data phase in %; 0 = automatic
 
     @property
     def bitrate(self) -> int:
@@ -48,6 +50,9 @@ class ChannelCfg:
             raise ValueError("波特率应在 5~1000 kbaud/s")
         if self.brs and not self.bitrate_kbps <= self.data_kbps <= 8000:
             raise ValueError("数据域波特率应不低于仲裁域且不超过 8000 kbaud/s")
+        for v in (self.sample_pct, self.data_sample_pct):
+            if v and not 50 <= v <= 95:
+                raise ValueError("采样点应在 50~95 %（0 = 自动）")
         if self.calc_load and not 20 <= self.load_interval_ms <= 10000:
             raise ValueError("负载率刷新时间应在 20~10000 ms")
 

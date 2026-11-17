@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 from zdiag.crc import CUSTOM, PRESETS, CrcSpec, crc_calc, preset_names
 from zdiag.flash import load_image
 from zdiag.busstats import ChannelCfg
-from zdiag.devmgr import bitrate_choices_kbps, has_terminator, is_fd_device
+from zdiag.devmgr import bitrate_choices_kbps, has_sample_point, has_terminator, is_fd_device
 from zdiag.project import Channel, DiagConfig, LogCfg, parse_hex, parse_id
 from .common import hex_edit, info, int_of, pick_file, warn
 from .qt import Qt, QtWidgets as W
@@ -385,22 +385,29 @@ class ChannelConfigDialog(W.QDialog):
         self.c_accel.addItems(["是", "否"])
         self.c_mode = W.QComboBox()
         self.c_mode.addItems(["正常模式", "只听模式"])
+        self.c_sp, self.c_dsp = W.QComboBox(), W.QComboBox()
+        for c in (self.c_sp, self.c_dsp):
+            c.setEditable(True)
+            c.addItems(["自动", "70", "75", "80", "85", "87.5", "90"])
         self.k_term = W.QCheckBox("打开终端电阻")
         self.k_load = W.QCheckBox("计算总线负载率")
         self.e_interval = W.QLineEdit()
         self.e_interval.setFixedWidth(80)
         rows = [("协议:", self.c_proto), ("CANFD加速:", self.c_accel), ("波特率(kbaud/s):", self.c_baud),
                 ("数据域波特率(kbaud/s):", self.c_dbaud), ("工作模式:", self.c_mode)]
+        if has_sample_point(device):                   # gs_usb: the host computes the bit timing, so the sample point is a choice
+            rows[3:3] = [("采样点(%):", self.c_sp), ("数据域采样点(%):", self.c_dsp)]
         for r, (lab, wd) in enumerate(rows):
             g.addWidget(W.QLabel(lab), r, 0)
             g.addWidget(wd, r, 1, 1, 2)
-        g.addWidget(self.k_term, 5, 0, 1, 3)
-        g.addWidget(self.k_load, 6, 0, 1, 3)
-        g.addWidget(W.QLabel("刷新时间(ms):"), 7, 0)
-        g.addWidget(self.e_interval, 7, 1)
+        r0 = len(rows)
+        g.addWidget(self.k_term, r0, 0, 1, 3)
+        g.addWidget(self.k_load, r0 + 1, 0, 1, 3)
+        g.addWidget(W.QLabel("刷新时间(ms):"), r0 + 2, 0)
+        g.addWidget(self.e_interval, r0 + 2, 1)
         self.b_ok, self.b_cancel = W.QPushButton("启动"), W.QPushButton("取消")
-        g.addWidget(self.b_ok, 8, 1)
-        g.addWidget(self.b_cancel, 8, 2)
+        g.addWidget(self.b_ok, r0 + 3, 1)
+        g.addWidget(self.b_cancel, r0 + 3, 2)
         if not has_terminator(device):
             self.k_term.setEnabled(False)
             self.k_term.setText("终端电阻(此设备无软件控制，请用硬件跳线)")
@@ -415,6 +422,8 @@ class ChannelConfigDialog(W.QDialog):
         self.c_dbaud.setCurrentText(f"{cfg.data_kbps:g}")
         self.c_mode.setCurrentIndex(1 if cfg.listen_only else 0)
         self.k_term.setChecked(cfg.terminator and has_terminator(device))
+        self.c_sp.setCurrentText(f"{cfg.sample_pct:g}" if cfg.sample_pct else "自动")
+        self.c_dsp.setCurrentText(f"{cfg.data_sample_pct:g}" if cfg.data_sample_pct else "自动")
         self.k_load.setChecked(cfg.calc_load)
         self.e_interval.setText(str(cfg.load_interval_ms))
         self._sync()
@@ -425,6 +434,11 @@ class ChannelConfigDialog(W.QDialog):
         self.c_dbaud.setEnabled(is_fd and self.c_accel.currentIndex() == 0)      # 加速=否: 数据域沿用仲裁域速率
         self.e_interval.setEnabled(self.k_load.isChecked())
 
+    @staticmethod
+    def _sp(box) -> float:
+        t = box.currentText().strip()
+        return 0.0 if t in ("", "自动") else float(t)
+
     def _on_ok(self) -> None:
         try:
             cfg = ChannelCfg(
@@ -434,6 +448,7 @@ class ChannelConfigDialog(W.QDialog):
                 fd_accel=self.c_accel.currentIndex() == 0,
                 listen_only=self.c_mode.currentIndex() == 1,
                 terminator=self.k_term.isChecked(),
+                sample_pct=self._sp(self.c_sp), data_sample_pct=self._sp(self.c_dsp),
                 calc_load=self.k_load.isChecked(),
                 load_interval_ms=int_of(self.e_interval, "刷新时间", 20, 10000) if self.k_load.isChecked() else 200)
             cfg.validate()
