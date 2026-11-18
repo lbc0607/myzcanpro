@@ -25,9 +25,54 @@ def feat(v):
     return "、".join(n for b, n in names if v & b) or "无"
 
 
+def raw_test(dev, i):
+    import struct
+    io = dev.io
+    nb = G.calc_bittiming(i["fclk"], 500_000, 87.5, i["nominal"])
+    lim = i["data"] or i["nominal"]
+    db = G.calc_bittiming(i["fclk"], 2_000_000, 75.0, lim)
+    def tb(b):
+        return struct.pack("<5I", b["prop_seg"], b["phase_seg1"], b["phase_seg2"], b["sjw"], b["brp"])
+    for fd in (True, False):
+        for ts in (True, False):
+            for lb in (True, False):
+                flags = (G.F_LOOP_BACK if lb else 0) | (G.F_FD if fd else 0) | (G.F_HW_TIMESTAMP if ts else 0)
+                tag = "FD=%d 时间戳=%d 回环=%d" % (fd, ts, lb)
+                try:
+                    io.ctrl_out(G.BREQ_MODE, 0, struct.pack("<II", G.MODE_RESET, 0))
+                    io.ctrl_out(G.BREQ_BITTIMING, 0, tb(nb))
+                    if fd:
+                        io.ctrl_out(G.BREQ_DATA_BITTIMING, 0, tb(db))
+                    io.ctrl_out(G.BREQ_MODE, 0, struct.pack("<II", G.MODE_START, flags))
+                except Exception as e:
+                    print("[%s] 控制请求失败: %r" % (tag, e))
+                    continue
+                for variant, (vfd, vts) in (("同模式帧", (fd, ts)),) + ((("另一种帧长", (not fd, ts)),) if fd else ()):
+                    fr = G.CanFrame(0x123, bytes(range(8)), fd=vfd and fd, brs=False)
+                    data = G.pack_frame(fr, 1, 0, vfd, vts)
+                    try:
+                        ok = io.write(data, 200)
+                    except Exception as e:
+                        print("[%s / %s] 写失败: %r" % (tag, variant, e))
+                        continue
+                    chunks, t0 = [], time.time()
+                    while time.time() - t0 < 0.4:
+                        c = io.read(1024, 50)
+                        if c:
+                            chunks.append(c)
+                    print("[%s / %s] 写入 %d 字节 ok=%s；收到 %d 个包: %s" % (tag, variant, len(data), ok, len(chunks),
+                                                                  " | ".join("%d字节 %s" % (len(c), c[:24].hex()) for c in chunks[:4])))
+                io.ctrl_out(G.BREQ_MODE, 0, struct.pack("<II", G.MODE_RESET, 0))
+    try:
+        print("GET_STATE:", io.ctrl_in(G.BREQ_GET_STATE, 0, 12).hex())
+    except Exception as e:
+        print("GET_STATE 失败:", repr(e))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--loop", action="store_true")
+    ap.add_argument("--raw", action="store_true", help="逐种帧格式向设备写一帧并打印设备返回的原始字节（排查回显/帧长度问题）")
     ap.add_argument("--pack", type=int, default=1)
     ap.add_argument("--index", type=int, default=0)
     a = ap.parse_args()
@@ -60,6 +105,10 @@ def main():
                 print("  %7.0f kbaud/s: brp=%d tseg1=%d tseg2=%d sjw=%d 采样点=%.1f%%" % (rate / 1000, b["brp"], b["prop_seg"] + b["phase_seg1"], b["phase_seg2"], b["sjw"], b["sample_pct"]))
             except ValueError as e:
                 print("  %7.0f kbaud/s: %s" % (rate / 1000, e))
+        if getattr(dev, "ext_error", ""):
+            print("读取 BT_CONST_EXT 失败:", dev.ext_error, "→ 数据域限制按 STM32 FDCAN 常规值估计:", i["data"] and {k: v for k, v in i["data"].items() if k != "feature"})
+        if a.raw:
+            raw_test(dev, i)
         if a.loop:
             G.TX_PACK = max(1, a.pack)
             fd = bool(i["feature"] & G.F_FD)

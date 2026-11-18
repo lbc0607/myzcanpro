@@ -277,12 +277,16 @@ class GsUsbDevice:
         for ch in range(self.channels):
             nom = parse_bt_const(self.io.ctrl_in(BREQ_BT_CONST, ch, 40))
             dat = None
+            self.ext_error = ""
             if nom["feature"] & F_BT_CONST_EXT:
                 try:
                     ext = self.io.ctrl_in(BREQ_BT_CONST_EXT, ch, 80)
                     nom, dat = parse_bt_const(ext[:40]), parse_bt_const(ext[40:80])
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.ext_error = str(e) or repr(e)
+            if dat is None and nom["feature"] & F_FD:                   # no data-phase limits reported: STM32 FDCAN data-phase limits
+                dat = dict(nom, tseg1_max=min(nom["tseg1_max"], 32), tseg2_max=min(nom["tseg2_max"], 16),
+                           sjw_max=min(nom["sjw_max"], 16), brp_max=min(nom["brp_max"], 32), guessed=1)
             self.consts[ch] = (nom, dat)
         self._clk: Optional[float] = None
         self._ts_hi, self._ts_last = 0, 0
