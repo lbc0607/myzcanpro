@@ -128,8 +128,8 @@ def main():
             while bus.recv(0) is not None:
                 got += 1
             dt = time.time() - t0 - 0.5
-            print("自环: 发出 %d 帧(%s)，用时 %.2f 秒 = %.0f 帧/秒，回显确认 %d，收到 %d；每次 USB 写 %d 帧" %
-                  (sent, "FD 64字节" if fd else "经典8字节", dt, sent / max(dt, 1e-6), bus.stats.tx, got, G.TX_PACK))
+            print("自环: 发出 %d 帧(%s)，用时 %.2f 秒 = %.0f 帧/秒，回显确认 %d，收到 %d；每次 USB 写 %d 帧，设备回显=%s" %
+                  (sent, "FD 64字节" if fd else "经典8字节", dt, sent / max(dt, 1e-6), bus.stats.tx, got, G.TX_PACK, bus.echo_mode))
             print("事件:", "; ".join(t for _, t in bus.events))
             dev.stop_channel(0)
     finally:

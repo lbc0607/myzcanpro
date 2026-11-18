@@ -280,8 +280,10 @@ class GsUsbDevice:
             self.ext_error = ""
             if nom["feature"] & F_BT_CONST_EXT:
                 try:
-                    ext = self.io.ctrl_in(BREQ_BT_CONST_EXT, ch, 80)
-                    nom, dat = parse_bt_const(ext[:40]), parse_bt_const(ext[40:80])
+                    ext = self.io.ctrl_in(BREQ_BT_CONST_EXT, ch, 72)
+                    nom = parse_bt_const(ext[:40])
+                    d = struct.unpack_from("<8I", ext, 40)               # data phase: tseg1/2 min/max, sjw_max, brp min/max/inc (no feature, no fclk)
+                    dat = dict(nom, tseg1_min=d[0], tseg1_max=d[1], tseg2_min=d[2], tseg2_max=d[3], sjw_max=d[4], brp_min=d[5], brp_max=d[6], brp_inc=d[7])
                 except Exception as e:
                     self.ext_error = str(e) or repr(e)
             if dat is None and nom["feature"] & F_FD:                   # no data-phase limits reported: STM32 FDCAN data-phase limits
@@ -401,7 +403,8 @@ class GsUsbBus(Bus):
         self._q: "queue.Queue[CanFrame]" = queue.Queue()
         self._lock = threading.Lock()
         self._free = collections.deque(range(TX_WINDOW))
-        self._pending: Dict[int, CanFrame] = {}
+        self._pending: Dict[int, Tuple[CanFrame, float]] = {}
+        self.echo_mode: Optional[bool] = None          # None = unknown yet, True = device echoes our frames, False = it does not (loopback, some firmware)
         self._failed: Optional[str] = None
         self._recover_t = 0.0
         self._flags = (F_LISTEN_ONLY if cfg.listen_only else 0) | (F_FD if cfg.is_fd else 0) | (F_HW_TIMESTAMP if self.use_ts else 0)
@@ -444,8 +447,10 @@ class GsUsbBus(Bus):
         ts = self.device.host_ts(f["ts"])
         if f["echo"] != ECHO_RX:                                          # our own frame is on the bus now
             with self._lock:
-                fr = self._pending.pop(f["echo"], None)
-                if fr is not None:
+                self.echo_mode = True
+                got = self._pending.pop(f["echo"], None)
+                fr = got[0] if got is not None else None
+                if got is not None:
                     self._free.append(f["echo"])
             if fr is not None:
                 self.stats.count_tx(fr)
@@ -502,11 +507,27 @@ class GsUsbBus(Bus):
     # -- Bus API
     def _claim(self, fr: CanFrame) -> Optional[int]:
         with self._lock:
+            if self.echo_mode is False:
+                return 0                                                  # no echoes to wait for: USB back-pressure (write timeout) is the flow control
             if not self._free:
+                if self.echo_mode is None and self._pending and time.monotonic() - min(t for _, t in self._pending.values()) > 0.25:
+                    self._echo_off()
+                    return 0
                 return None
             eid = self._free.popleft()
-            self._pending[eid] = fr
+            self._pending[eid] = (fr, time.monotonic())
             return eid
+
+    def _echo_off(self) -> None:
+        """The window filled up and not one echo ever came: this device (or mode, e.g. loopback) does not echo.  Count what was sent."""
+        self.echo_mode = False
+        self._note("设备没有回显发送的帧（自环模式或固件不回显），改为按写入成功计数、靠 USB 背压流控")
+        for fr, _ in self._pending.values():
+            self.stats.count_tx(fr)
+            if self.tap is not None:
+                self.tap.feed(self.channel, fr, "TX")
+        self._pending.clear()
+        self._free = collections.deque(range(TX_WINDOW))
 
     def _release(self, eid: int) -> None:
         with self._lock:
@@ -556,6 +577,11 @@ class GsUsbBus(Bus):
                 for eid in ids:
                     self._release(eid)
                 break
+            if self.echo_mode is False:
+                for fr in batch:
+                    self.stats.count_tx(fr)
+                    if self.tap is not None:
+                        self.tap.feed(self.channel, fr, "TX")
             sent += len(batch)
             i += len(batch)
         return sent

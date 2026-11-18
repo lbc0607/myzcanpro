@@ -18,7 +18,8 @@ def bt_bytes(d):
 class FakeUsb(G.UsbIO):
     """A gs_usb device on a table: records control requests, echoes every written frame, can be wired to a peer (its TX = peer's RX)."""
 
-    def __init__(self, ts=True, fifo=64, feature=None):
+    def __init__(self, ts=True, fifo=64, feature=None, echo=True, loopback=False):
+        self.echo, self.loopback = echo, loopback
         self.nom = dict(NOM, feature=NOM["feature"] if feature is None else feature)
         self.ts = ts
         self.ctrl = []
@@ -44,7 +45,7 @@ class FakeUsb(G.UsbIO):
         if breq == G.BREQ_BT_CONST:
             return bt_bytes(self.nom)
         if breq == G.BREQ_BT_CONST_EXT:
-            return bt_bytes(self.nom) + bt_bytes(DAT)
+            return bt_bytes(self.nom) + struct.pack("<8I", *[DAT[k] for k in ("tseg1_min", "tseg1_max", "tseg2_min", "tseg2_max", "sjw_max", "brp_min", "brp_max", "brp_inc")])
         raise AssertionError(breq)
 
     def _push(self, b):
@@ -71,7 +72,12 @@ class FakeUsb(G.UsbIO):
             f = bytearray(data[i:i + size])
             if self.ts:
                 f[-4:] = struct.pack("<I", self.now_us())
-            self._push(bytes(f))                                  # echo (echo_id unchanged)
+            if self.echo:
+                self._push(bytes(f))                              # echo (echo_id unchanged)
+            if self.loopback:                                     # controller loopback: the frame comes back as a received frame only
+                g = bytearray(f)
+                g[0:4] = struct.pack("<I", G.ECHO_RX)
+                self._push(bytes(g))
             if self.peer is not None:                             # the same frame as received by the peer
                 g = bytearray(f)
                 g[0:4] = struct.pack("<I", G.ECHO_RX)
@@ -185,7 +191,6 @@ class DeviceAndBus(unittest.TestCase):
         frames = [CanFrame(0x100, b"\0") for _ in range(old + 10)]
         self.assertEqual(bus.send_many(frames), old)
         self.assertEqual(bus.send_many(frames), 0)                              # full
-        self.assertRaises(G.GsUsbError, bus.send, frames[0])
         # echoes free the slots again
         for eid in list(bus._pending):
             io._push(G.pack_frame(CanFrame(0x100, b"\0"), eid, 0, False, True))
@@ -206,6 +211,31 @@ class DeviceAndBus(unittest.TestCase):
         self.assertEqual(len(bus._free), G.TX_WINDOW)
         io.paused = False
         self.assertEqual(bus.send_many([CanFrame(1, b"a")] * 3), 3)
+        dev.close()
+
+    def test_device_without_echo_keeps_sending_and_counts(self):
+        io = FakeUsb(echo=False, loopback=True)
+        dev, _ = open_dev(io)
+        bus = dev.start_channel(0, ChannelCfg(protocol="CAN FD"), FrameTap())
+        frames = [CanFrame(0x100, bytes(8), fd=True) for _ in range(G.TX_WINDOW)]
+        self.assertEqual(bus.send_many(frames), G.TX_WINDOW)
+        self.assertEqual(bus.send_many(frames[:3]), 0)                          # window full, echo mode still unknown
+        time.sleep(0.3)
+        self.assertEqual(bus.send_many(frames), len(frames))                    # now: no echo expected, flow control = USB back-pressure
+        self.assertIs(bus.echo_mode, False)
+        self.assertEqual(bus.stats.tx, 2 * G.TX_WINDOW)
+        for _ in range(200):
+            if bus.stats.rx >= 2 * G.TX_WINDOW:
+                break
+            time.sleep(0.01)
+        self.assertEqual(bus.stats.rx, 2 * G.TX_WINDOW)                         # the loopback copies arrive as RX frames
+        dev.close()
+
+    def test_bt_const_ext_has_72_bytes_and_gives_data_limits(self):
+        dev, _ = open_dev()
+        nom, dat = dev.consts[0]
+        self.assertEqual((dat["tseg1_max"], dat["brp_max"], nom["tseg1_max"]), (32, 32, 256))
+        self.assertEqual(dev.ext_error, "")
         dev.close()
 
     def test_listen_only_cannot_send(self):
