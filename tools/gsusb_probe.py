@@ -112,7 +112,7 @@ def main():
         if a.loop:
             G.TX_PACK = max(1, a.pack)
             fd = bool(i["feature"] & G.F_FD)
-            cfg = ChannelCfg(protocol="CAN FD" if fd else "CAN", bitrate_kbps=500, data_kbps=2000, terminator=False)
+            cfg = ChannelCfg(protocol="CAN FD" if fd else "CAN", bitrate_kbps=500, data_kbps=5000, terminator=False)
             bus = dev.start_channel(0, cfg, None, G.F_LOOP_BACK)
             n, got, t0 = 2000, 0, time.time()
             sent = 0
