@@ -69,10 +69,42 @@ def raw_test(dev, i):
         print("GET_STATE 失败:", repr(e))
 
 
+def bench(dev, i):
+    import threading
+    fd = bool(i["feature"] & G.F_FD)
+    cfg = ChannelCfg(protocol="CAN FD" if fd else "CAN", bitrate_kbps=500, data_kbps=5000, terminator=False)
+    for nthr in (1, 2, 4):
+        bus = dev.start_channel(0, cfg, None, G.F_LOOP_BACK)
+        n = 3000
+        per = n // nthr
+        t0 = time.time()
+        def work(k):
+            fr = [CanFrame(0x100 + k, bytes(64 if fd else 8), fd=fd, brs=fd) for _ in range(per)]
+            sent = 0
+            while sent < per and time.time() - t0 < 15:
+                m = bus.send_many(fr[sent:sent + 32])
+                sent += m
+                if not m:
+                    time.sleep(0.0003)
+        ths = [threading.Thread(target=work, args=(k,)) for k in range(nthr)]
+        [t.start() for t in ths]
+        [t.join() for t in ths]
+        dt = time.time() - t0
+        time.sleep(0.5)
+        got = 0
+        while bus.recv(0) is not None:
+            got += 1
+        print("写线程 %d 个: %d 帧用时 %.2f 秒 = %.0f 帧/秒(≈%.0f kB/s 文件数据)，收到 %d，回显模式=%s" %
+              (nthr, per * nthr, dt, per * nthr / dt, per * nthr / dt * (61 if fd else 5) / 1000, got, bus.echo_mode))
+        dev.stop_channel(0)
+        time.sleep(0.2)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--loop", action="store_true")
     ap.add_argument("--raw", action="store_true", help="逐种帧格式向设备写一帧并打印设备返回的原始字节（排查回显/帧长度问题）")
+    ap.add_argument("--bench", action="store_true", help="自环测速：1/2/4 个写线程各发 3000 帧，看 USB 写入能否并行提速")
     ap.add_argument("--pack", type=int, default=1)
     ap.add_argument("--index", type=int, default=0)
     a = ap.parse_args()
@@ -109,6 +141,8 @@ def main():
             print("读取 BT_CONST_EXT 失败:", dev.ext_error, "→ 数据域限制按 STM32 FDCAN 常规值估计:", i["data"] and {k: v for k, v in i["data"].items() if k != "feature"})
         if a.raw:
             raw_test(dev, i)
+        if a.bench:
+            bench(dev, i)
         if a.loop:
             G.TX_PACK = max(1, a.pack)
             fd = bool(i["feature"] & G.F_FD)
