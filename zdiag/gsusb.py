@@ -175,7 +175,10 @@ def _import_usb():
         import usb.util            # noqa: F401
         return usb.core
     except ImportError:
-        raise GsUsbError("缺少 pyusb：请执行 python -m pip install pyusb，并把 32 位 libusb-1.0.dll 放到程序目录")
+        import struct
+        import sys
+        raise GsUsbError("当前运行程序的 Python 里没有 pyusb。请用同一个 Python 执行：\n\"%s\" -m pip install pyusb\n（该 Python 为 %d 位，libusb-1.0.dll 也必须是 %d 位）"
+                         % (sys.executable, 8 * struct.calcsize("P"), 8 * struct.calcsize("P")))
 
 
 def _backend(base: str):
@@ -183,7 +186,8 @@ def _backend(base: str):
     path = find_libusb(base)
     be = lb.get_backend(find_library=(lambda _n: path)) if path else lb.get_backend()
     if be is None:
-        raise GsUsbError("找不到 libusb-1.0.dll：请把 32 位的 libusb-1.0.dll 放到程序目录（与 exe 同级）")
+        import struct
+        raise GsUsbError("找不到可用的 libusb-1.0.dll（位数必须与 Python 一致，当前 Python 为 %d 位）：请放到程序目录或 vendor 目录" % (8 * struct.calcsize("P")))
     return be
 
 
@@ -195,8 +199,8 @@ def _find(usb_core, backend) -> list:
 
 class PyUsbIO(UsbIO):
     def __init__(self, base: str, index: int = 0) -> None:
-        import usb.util
         usb_core = _import_usb()
+        import usb.util
         devs = _find(usb_core, _backend(base))
         if index >= len(devs):
             raise GsUsbError("没有找到 gs_usb 设备（VID 1D50 / PID 606F）：请检查是否插好，设备管理器里是否有 \"CAN FD Interface\"")
