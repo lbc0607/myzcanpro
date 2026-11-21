@@ -198,7 +198,9 @@ class Ops:
         return {"message": "已关闭", **self.status()}
 
     def channel_start(self, channel: int, protocol: str = "CAN", bitrate_kbps: float = 500.0, data_kbps: float = 2000.0,
-                      fd_accel: bool = True, listen_only: bool = False, terminator: bool = True) -> Dict[str, Any]:
+                      fd_accel: bool = True, listen_only: bool = False, terminator: bool = True,
+                      sample_pct: float = 0.0, data_sample_pct: float = 0.0) -> Dict[str, Any]:
+        """sample_pct / data_sample_pct: sample point in % (0 = automatic); only the gs_usb device uses them."""
         d = self.ctx.dev
         if not d.is_open:
             raise OpsError("请先 device_open 打开设备")
@@ -209,7 +211,8 @@ class Ops:
         if protocol not in ("CAN", "CAN FD"):
             raise OpsError('protocol 应为 "CAN" 或 "CAN FD"')
         cfg = ChannelCfg(protocol=protocol, bitrate_kbps=float(bitrate_kbps), data_kbps=float(data_kbps),
-                         fd_accel=bool(fd_accel), listen_only=bool(listen_only), terminator=bool(terminator))
+                         fd_accel=bool(fd_accel), listen_only=bool(listen_only), terminator=bool(terminator),
+                         sample_pct=float(sample_pct), data_sample_pct=float(data_sample_pct))
         try:
             d.start_channel(n, cfg, self.ctx.diag_cfg.addr, self.ctx.channel.sim_profile, self.ctx.diag_cfg.settings.rx_padding)
         except ConnError as e:

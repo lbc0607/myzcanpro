@@ -30,10 +30,12 @@ def endpoint_path(home: str) -> str:
 
 
 class RpcServer:
-    def __init__(self, ops: Ops, home: str, host: str = "127.0.0.1", port: int = 0, token: str = "", on_call=None) -> None:
+    def __init__(self, ops: Ops, home: str, host: str = "127.0.0.1", port: int = 0, token: str = "", on_call=None,
+                 ui_html: Optional[bytes] = None) -> None:
         if host not in ("127.0.0.1", "localhost", "::1"):
             raise ValueError("只允许绑定本机回环地址")
         self.ops, self.home = ops, home
+        self.ui_html = ui_html                                   # phone app: the page served at "/" (it carries no secret; the token comes from the URL fragment)
         self.on_call = on_call                                   # (method, ok) after every call, in the handler thread
         self.token = token or secrets.token_urlsafe(24)
         self._bus_lock = threading.Lock()
@@ -121,12 +123,22 @@ class RpcServer:
             def do_GET(self):
                 if self.path == "/ping" and self._host_ok():
                     return self._send(200, {"app": "CanVDS", "pid": os.getpid()})
+                if srv.ui_html is not None and self._host_ok() and self.path.split("?")[0].split("#")[0] in ("/", "/index.html"):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(srv.ui_html)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'")
+                    self.end_headers()
+                    return self.wfile.write(srv.ui_html)
                 self._send(404, {"ok": False, "error": "not found"})
 
             def do_POST(self):
                 if self.path != "/call":
                     return self._send(404, {"ok": False, "error": "not found"})
-                if not self._host_ok() or self.headers.get("Origin"):
+                origin = self.headers.get("Origin")
+                own = origin in (f"http://127.0.0.1:{srv.port}", f"http://localhost:{srv.port}") and srv.ui_html is not None
+                if not self._host_ok() or (origin and not own):          # other web pages in a browser are refused; our own page is fine
                     return self._send(403, {"ok": False, "error": "forbidden"})
                 got = (self.headers.get("Authorization") or "")
                 if not got.startswith("Bearer ") or not hmac.compare_digest(got[7:], srv.token):

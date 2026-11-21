@@ -147,7 +147,13 @@ class DeviceManager:
     def _open_gs(self, name: str, index: int):
         try:
             from .gsusb import GsUsbDevice
-            return GsUsbDevice(name, index, self.dll_dir)
+            from . import android_usb
+            io = android_usb.current()                         # on the phone the app hands over the USB connection it opened
+            if io is None and android_usb.on_android():
+                raise ConnError("请先在 App 里用 USB 线连接适配器并允许 USB 权限")
+            return GsUsbDevice(name, index, self.dll_dir, io=io)
+        except ConnError:
+            raise
         except Exception as e:
             raise ConnError(f"打开设备失败: {e}")
 
