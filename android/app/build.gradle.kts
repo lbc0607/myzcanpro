@@ -40,4 +40,6 @@ val syncPython by tasks.registering(Sync::class) {
     from("${rootDir}/../zdiag_ui") { into("zdiag_ui"); exclude("**/__pycache__", "**/*.pyc") }
     into(layout.buildDirectory.dir("pysrc"))
 }
-tasks.named("preBuild") { dependsOn(syncPython) }
+tasks.configureEach {
+    if (name.startsWith("merge") && name.endsWith("PythonSources")) dependsOn(syncPython)
+}
