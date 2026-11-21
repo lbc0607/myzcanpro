@@ -24,7 +24,6 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.Toast
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
 import org.json.JSONArray
@@ -96,7 +95,7 @@ class MainActivity : Activity() {
                 runOnUiThread { web.loadUrl("$url/#$token") }
                 connectUsb()
             } catch (e: Throwable) {
-                runOnUiThread { Toast.makeText(this, "启动失败: $e", Toast.LENGTH_LONG).show() }
+                runOnUiThread { AlertDialog.Builder(this).setTitle("启动失败").setMessage(e.toString()).setPositiveButton("确定", null).show() }
             }
         }.start()
     }
