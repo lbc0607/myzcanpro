@@ -624,3 +624,45 @@ class GsUsbBus(Bus):
             self.io.ctrl_out(BREQ_MODE, self.channel, struct.pack("<II", MODE_RESET, 0))
         except Exception:
             pass
+
+
+def bench_loopback(dev: "GsUsbDevice", threads=(1, 2, 4), n: int = 3000, seconds: float = 15.0) -> List[dict]:
+    """Controller-internal loopback speed test (no bus needed, channel 0 must not be in use): how many frames per second can the host
+    push through USB with 1 / 2 / 4 writer threads, and what does one pack_frame cost?  Used by tools/gsusb_probe.py and the phone app."""
+    fd = bool(dev.consts[0][0]["feature"] & F_FD)
+    out = []
+    t0 = time.perf_counter()
+    fr = CanFrame(0x100, bytes(64 if fd else 8), fd=fd, brs=fd)
+    for k in range(2000):
+        pack_frame(fr, k & 31, 0, fd, True)
+    out.append(dict(name="pack_frame x2000(仅 Python 打包)", seconds=round(time.perf_counter() - t0, 4)))
+    cfg = ChannelCfg(protocol="CAN FD" if fd else "CAN", bitrate_kbps=500, data_kbps=5000, terminator=False)
+    for nthr in threads:
+        bus = dev.start_channel(0, cfg, None, F_LOOP_BACK)
+        per = n // nthr
+        t1 = time.perf_counter()
+
+        def work(k, bus=bus, per=per):
+            frames = [CanFrame(0x100 + k, bytes(64 if fd else 8), fd=fd, brs=fd) for _ in range(per)]
+            sent = 0
+            while sent < per and time.perf_counter() - t1 < seconds:
+                m = bus.send_many(frames[sent:sent + 32])
+                sent += m
+                if not m:
+                    time.sleep(0.0003)
+        ths = [threading.Thread(target=work, args=(k,)) for k in range(nthr)]
+        for t in ths:
+            t.start()
+        for t in ths:
+            t.join()
+        dt = time.perf_counter() - t1
+        time.sleep(0.5)
+        got = 0
+        while bus.recv(0) is not None:
+            got += 1
+        out.append(dict(name="写线程 %d 个" % nthr, frames=per * nthr, seconds=round(dt, 2), fps=round(per * nthr / dt),
+                        kBps=round(per * nthr / dt * (61 if fd else 5) / 1000), received=got, echo=bus.echo_mode,
+                        usb_w_timeouts=getattr(dev.io, "w_timeouts", None)))
+        dev.stop_channel(0)
+        time.sleep(0.2)
+    return out

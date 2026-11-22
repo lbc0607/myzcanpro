@@ -939,6 +939,16 @@ class Ops:
             return e
         return self._ft_start("receive", channels, cfg, make)
 
+    def usb_bench(self) -> Dict[str, Any]:
+        """gs_usb only: controller-internal loopback speed test (nothing is sent to the bus). Close all channels first."""
+        d = self.ctx.dev.device
+        if not hasattr(d, "consts"):
+            raise OpsError("只有 gs_usb 设备支持此测试（先打开 gs_usb 设备）")
+        if self.ctx.dev.started():
+            raise OpsError("请先停止所有通道再测速")
+        from .gsusb import bench_loopback
+        return {"results": bench_loopback(d)}
+
     def ft_status(self) -> Dict[str, Any]:
         out = {r: j.status() for r, j in self._ft.items()}
         return {"jobs": out, "active": [r for r, j in self._ft.items() if j.running()]} if out else {"jobs": {}, "active": [],

@@ -52,6 +52,9 @@ pre{margin:0;white-space:pre-wrap;word-break:break-all;font:12.5px/1.45 var(--mo
     <div class="mono" id="devmsg" style="margin-top:8px;color:var(--muted)"></div>
   </div>
   <div id="chans"></div>
+  <div class="card" id="benchcard" style="display:none"><h3>USB 速度自测（仅 gs_usb，不上总线）</h3>
+    <div class="mono" style="color:var(--muted)">先停止所有通道。约 10 秒，把结果发给开发者。</div>
+    <button class="b" id="bbench">开始自测</button><pre id="benchout" style="margin-top:8px"></pre></div>
 </section>
 <!-- ============ 文件传输 ============ -->
 <section id="s-ft">
@@ -170,6 +173,7 @@ function renderDevice(){
   if(!ST)return;
   $("#bopen").textContent=ST.is_open?"关闭设备":"打开设备";$("#bopen").classList.toggle("d",ST.is_open);$("#bopen").classList.toggle("p",!ST.is_open);
   $("#dev").disabled=$("#devidx").disabled=ST.is_open;
+  $("#benchcard").style.display=ST.is_open&&/gs_usb/.test(ST.device)?"":"none";
   $("#devmsg").textContent=ST.is_open?`已打开: ${ST.device} #${ST.index}`:"设备未打开";
   const n=ST.is_open?(DL.channel_counts[ST.device]||1):0, box=$("#chans");
   while(box.children.length<n){box.appendChild(chanCard(box.children.length))}
@@ -200,6 +204,7 @@ function chanCard(i){
     await poll()});
   return d;
 }
+$("#bbench").onclick=()=>act(async()=>{$("#benchout").textContent="测试中…";const r=await call("usb_bench");$("#benchout").textContent=r.results.map(x=>JSON.stringify(x)).join("\n")});
 $("#bopen").onclick=()=>act(async()=>{
   if(ST.is_open)await call("device_close");else await call("device_open",{name:$("#dev").value,index:+$("#devidx").value||0});
   await poll()});

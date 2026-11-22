@@ -70,34 +70,8 @@ def raw_test(dev, i):
 
 
 def bench(dev, i):
-    import threading
-    fd = bool(i["feature"] & G.F_FD)
-    cfg = ChannelCfg(protocol="CAN FD" if fd else "CAN", bitrate_kbps=500, data_kbps=5000, terminator=False)
-    for nthr in (1, 2, 4):
-        bus = dev.start_channel(0, cfg, None, G.F_LOOP_BACK)
-        n = 3000
-        per = n // nthr
-        t0 = time.time()
-        def work(k):
-            fr = [CanFrame(0x100 + k, bytes(64 if fd else 8), fd=fd, brs=fd) for _ in range(per)]
-            sent = 0
-            while sent < per and time.time() - t0 < 15:
-                m = bus.send_many(fr[sent:sent + 32])
-                sent += m
-                if not m:
-                    time.sleep(0.0003)
-        ths = [threading.Thread(target=work, args=(k,)) for k in range(nthr)]
-        [t.start() for t in ths]
-        [t.join() for t in ths]
-        dt = time.time() - t0
-        time.sleep(0.5)
-        got = 0
-        while bus.recv(0) is not None:
-            got += 1
-        print("写线程 %d 个: %d 帧用时 %.2f 秒 = %.0f 帧/秒(≈%.0f kB/s 文件数据)，收到 %d，回显模式=%s" %
-              (nthr, per * nthr, dt, per * nthr / dt, per * nthr / dt * (61 if fd else 5) / 1000, got, bus.echo_mode))
-        dev.stop_channel(0)
-        time.sleep(0.2)
+    for r in G.bench_loopback(dev):
+        print(r)
 
 
 def main():

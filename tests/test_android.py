@@ -117,6 +117,24 @@ class AndroidUsb(unittest.TestCase):
             del os.environ["ANDROID_ROOT"], os.environ["ANDROID_DATA"]
 
 
+class Bench(unittest.TestCase):
+    def test_usb_bench_runs_on_a_gs_usb_device(self):
+        from zdiag.ops import Ops, OpsError
+        from zdiag_ui.appctx import AppContext
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, True)
+        ops = Ops(AppContext(home))
+        self.assertRaises(OpsError, ops.usb_bench)                               # no device open
+        fake = FakeUsb(loopback=True)
+        AU.attach(FakeConn(fake), 0, "IN", "OUT")
+        self.addCleanup(AU.detach)
+        ops.ctx.dev.open(GS_DEVICE, 0)
+        r = ops.usb_bench()["results"]
+        self.assertEqual([x["name"] for x in r][1:], ["写线程 1 个", "写线程 2 个", "写线程 4 个"])
+        self.assertTrue(all(x["received"] == x["frames"] for x in r[1:]), r)
+        ops.ctx.dev.close()
+
+
 class WebUi(unittest.TestCase):
     def test_start_serves_page_and_calls(self):
         home = tempfile.mkdtemp()
