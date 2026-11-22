@@ -581,6 +581,9 @@ class GsUsbBus(Bus):
     def send_many(self, frames: list) -> int:
         self._check()
         sent, i, n = 0, 0, len(frames)
+        wf = getattr(self.io, "write_frames", None)
+        if wf is not None:
+            return self._send_many_pipelined(frames, wf)
         pack = max(1, TX_PACK)
         while i < n:
             batch, ids = [], []
@@ -611,6 +614,50 @@ class GsUsbBus(Bus):
                         self.tap.feed(self.channel, fr, "TX")
             sent += len(batch)
             i += len(batch)
+        if sent:
+            self._stall_since = None
+        elif frames:
+            now = time.monotonic()
+            if self._stall_since is None:
+                self._stall_since = now
+            elif now - self._stall_since > STALL_S:
+                self._stall_since = None
+                self._recover("发送停滞(没有回显/写入被拒绝)")
+        return sent
+
+    def _send_many_pipelined(self, frames: list, wf) -> int:
+        """The USB layer can have many transfers in flight at once (Android: writer thread pool): hand it a whole batch and
+        get back how many leading frames were accepted.  A single synchronous write costs 2-6 ms on a phone, which capped us at ~300 frames/s."""
+        sent, i, n = 0, 0, len(frames)
+        while i < n:
+            batch, ids, raws = [], [], []
+            while i + len(batch) < n and len(batch) < 32:
+                fr = frames[i + len(batch)]
+                eid = self._claim(fr)
+                if eid is None:
+                    break
+                batch.append(fr)
+                ids.append(eid)
+                raws.append(pack_frame(fr, eid, self.channel, self.fd_mode, self.use_ts, self.cfg.fd_accel))
+            if not batch:
+                break
+            try:
+                k = wf(raws, 20)
+            except GsUsbError:
+                for eid in ids:
+                    self._release(eid)
+                raise
+            for eid in ids[k:]:
+                self._release(eid)
+            if self.echo_mode is False:
+                for fr in batch[:k]:
+                    self.stats.count_tx(fr)
+                    if self.tap is not None:
+                        self.tap.feed(self.channel, fr, "TX")
+            sent += k
+            i += k
+            if k < len(batch):
+                break
         if sent:
             self._stall_since = None
         elif frames:

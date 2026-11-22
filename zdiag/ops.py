@@ -1088,4 +1088,4 @@ METHODS = ["status", "device_list", "device_open", "device_close", "channel_star
            "monitor_trace", "monitor_snapshot", "monitor_capture", "monitor_clear", "record_start", "record_stop",
            "settings_get", "settings_set",
            "lin_open", "lin_close", "lin_status", "lin_request", "lin_scan_nodes", "lin_scan_pump",
-           "ft_send", "ft_receive", "ft_status", "ft_stop"]
+           "ft_send", "ft_receive", "ft_status", "ft_stop", "usb_bench"]

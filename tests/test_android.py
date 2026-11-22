@@ -53,6 +53,27 @@ class FakeReader:
         self.stopped = True
 
 
+class FakeWriter:
+    """UsbWriter.kt: takes [u16 len][frame]... and writes them to the device; `fail_after` simulates a transfer that gets refused."""
+    def __init__(self, dev, fail_after=None):
+        self.dev, self.fail_after, self.calls, self.stopped = dev, fail_after, 0, False
+
+    def writeAll(self, blob, timeout_ms):
+        self.calls += 1
+        i, k = 0, 0
+        while i + 2 <= len(blob):
+            n = int.from_bytes(blob[i:i + 2], "little")
+            if self.fail_after is not None and k >= self.fail_after:
+                return k
+            self.dev.write(bytes(blob[i + 2:i + 2 + n]), 20)
+            i += 2 + n
+            k += 1
+        return k
+
+    def stop(self):
+        self.stopped = True
+
+
 class AndroidUsb(unittest.TestCase):
     def tearDown(self):
         AU.detach()
@@ -87,6 +108,34 @@ class AndroidUsb(unittest.TestCase):
             self.assertFalse(rd.stopped)
         AU.detach()
         self.assertTrue(rd.stopped)
+
+    def test_pipelined_writer_sends_whole_batches(self):
+        fake = FakeUsb()
+        w = FakeWriter(fake)
+        AU.attach(FakeConn(fake), 0, "IN", "OUT", None, FakeReader(fake), w)
+        dm = DeviceManager("")
+        dm.open(GS_DEVICE, 0)
+        dm.start_channel(0, ChannelCfg(protocol="CAN FD", bitrate_kbps=500, data_kbps=2000))
+        bus = dm.chans[0].bus
+        frames = [CanFrame(0x100, bytes(range(60)), fd=True)] * 100
+        sent, t_end = 0, time.time() + 5
+        while sent < 100 and time.time() < t_end:                                # like the file-transfer link: poll until the window frees up
+            k = bus.send_many(frames[sent:])
+            sent += k
+            if not k:
+                time.sleep(0.001)
+        self.assertEqual(sent, 100)
+        self.assertGreaterEqual(w.calls, 4)                                      # batches of up to 32 frames per call, not one call per frame
+        for _ in range(200):
+            if bus.stats.tx >= 100:
+                break
+            time.sleep(0.01)
+        self.assertEqual(bus.stats.tx, 100)                                      # every echo matched its slot
+        self.assertEqual(len(bus._free), G.TX_WINDOW)
+        w.fail_after = 3                                                         # the 4th transfer of a batch is refused
+        self.assertEqual(bus.send_many(frames[:10]), 3)
+        self.assertEqual(len(bus._free) + len(bus._pending), G.TX_WINDOW)        # slots of the unsent frames were given back
+        dm.close()
 
     def test_unplug_is_reported(self):
         gone = [False]

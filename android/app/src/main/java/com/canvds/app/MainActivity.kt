@@ -40,6 +40,7 @@ class MainActivity : Activity() {
     private lateinit var usb: UsbManager
     private var device: UsbDevice? = null
     private var reader: UsbReader? = null
+    private var writer: UsbWriter? = null
     private var url = ""
     private var token = ""
     private val ids = listOf(0x1D50 to 0x606F, 0x1209 to 0x2323)
@@ -151,8 +152,10 @@ class MainActivity : Activity() {
             device = d
             val name = d.deviceName
             reader?.stop()
+            writer?.stop()
             reader = UsbReader(conn, epIn)
-            py().callAttr("attach_usb", conn, intf.id, epIn, epOut, BooleanSupplier { usb.deviceList.containsKey(name) }, reader)
+            writer = UsbWriter(conn, epOut)
+            py().callAttr("attach_usb", conn, intf.id, epIn, epOut, BooleanSupplier { usb.deviceList.containsKey(name) }, reader, writer)
             usbState("已连接 ${d.productName ?: "CAN 适配器"}（${"%04X".format(d.vendorId)}:${"%04X".format(d.productId)}），可以在下面打开设备")
         } catch (e: Throwable) {
             usbState("连接失败: $e")

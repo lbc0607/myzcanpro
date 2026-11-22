@@ -39,9 +39,12 @@ def _pybytes(buf, n: int) -> bytes:
 
 
 class AndroidUsbIO(UsbIO):
-    def __init__(self, conn, ifnum: int, ep_in, ep_out, present: Optional[Callable[[], bool]] = None, reader=None) -> None:
+    def __init__(self, conn, ifnum: int, ep_in, ep_out, present: Optional[Callable[[], bool]] = None, reader=None, writer=None) -> None:
         self.conn, self.ifnum, self.ep_in, self.ep_out, self.present = conn, ifnum, ep_in, ep_out, present
         self.reader = reader                                   # Kotlin thread that keeps the IN endpoint drained (see UsbReader.kt)
+        self.writer = writer                                   # Kotlin thread pool: several bulk-OUT transfers in flight at once (UsbWriter.kt)
+        if writer is not None:
+            self.write_frames = self._write_frames
         self._chunks: "collections.deque" = collections.deque()
         self._rbuf = None
         self._rsize = 0
@@ -105,6 +108,20 @@ class AndroidUsbIO(UsbIO):
             raise GsUsbError("USB 设备已拔出")
         return None
 
+    def _write_frames(self, frames, timeout_ms):
+        """Send frames concurrently; returns how many LEADING frames went through (later ones may have too - the caller treats the rest as
+        unsent and the protocol above tolerates the resulting duplicates)."""
+        blob = b"".join(len(f).to_bytes(2, "little") + f for f in frames)
+        t0 = time.perf_counter()
+        k = int(self.writer.writeAll(blob, max(timeout_ms, 300)))
+        self.w_ms += ((time.perf_counter() - t0) * 1000.0 / max(1, len(frames)) - self.w_ms) * 0.05
+        self.w_ok += k
+        if k < len(frames):
+            self.w_timeouts += 1
+            if self._gone():
+                raise GsUsbError("USB 设备已拔出")
+        return k
+
     def write(self, data, timeout_ms):
         d = bytes(data)
         # A timeout cancels the transfer; cancelling between the two USB packets of an 80-byte frame would leave half a frame in the device
@@ -133,22 +150,23 @@ class AndroidUsbIO(UsbIO):
     def release(self):
         """The app gave the connection up (unplugged / replaced)."""
         self._closed = True
-        if self.reader is not None:
-            try:
-                self.reader.stop()
-            except Exception:
-                pass
+        for h in (self.reader, self.writer):
+            if h is not None:
+                try:
+                    h.stop()
+                except Exception:
+                    pass
 
 
 _current: Optional[AndroidUsbIO] = None
 _cur_lock = threading.Lock()
 
 
-def attach(conn, ifnum: int, ep_in, ep_out, present=None, reader=None) -> None:
+def attach(conn, ifnum: int, ep_in, ep_out, present=None, reader=None, writer=None) -> None:
     """Called by the app once the permission is granted and the interface is claimed."""
     global _current
     with _cur_lock:
-        old, _current = _current, AndroidUsbIO(conn, ifnum, ep_in, ep_out, present, reader)
+        old, _current = _current, AndroidUsbIO(conn, ifnum, ep_in, ep_out, present, reader, writer)
     if old is not None:
         old.release()
 
