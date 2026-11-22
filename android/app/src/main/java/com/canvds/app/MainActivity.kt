@@ -16,6 +16,9 @@ import android.hardware.usb.UsbManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.net.Uri as AndroidUri
+import android.provider.Settings
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.view.WindowManager
@@ -60,6 +63,7 @@ class MainActivity : Activity() {
                     if (d != null && d.deviceName == device?.deviceName) {
                         device = null
                         py().callAttr("detach_usb")
+                        try { stopService(Intent(this@MainActivity, PerfService::class.java)) } catch (_: Throwable) {}
                         usbState("适配器已拔出，请重新插入后关闭并重新打开设备")
                     }
                 }
@@ -73,6 +77,13 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        Perf.init(this)
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (Build.VERSION.SDK_INT >= 24 && pm.isSustainedPerformanceModeSupported) { window.setSustainedPerformanceMode(true); Perf.sustained = true }
+        } catch (_: Throwable) {}
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 51)
         usb = getSystemService(Context.USB_SERVICE) as UsbManager
         web = WebView(this)
         setContentView(web)
@@ -110,7 +121,11 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         try { unregisterReceiver(receiver) } catch (_: Exception) {}
-        if (isFinishing) { try { py().callAttr("stop") } catch (_: Throwable) {} }
+        if (isFinishing) {
+            try { py().callAttr("stop") } catch (_: Throwable) {}
+            try { stopService(Intent(this, PerfService::class.java)) } catch (_: Throwable) {}
+            Perf.stop()
+        }
         super.onDestroy()
     }
 
@@ -165,10 +180,33 @@ class MainActivity : Activity() {
                 writer = UsbWriter(conn, epOut)
                 py().callAttr("attach_usb", conn, intf.id, epIn, epOut, supplier, reader, writer)
             }
+            startBoost()
             usbState("已连接 ${d.productName ?: "CAN 适配器"}（${"%04X".format(d.vendorId)}:${"%04X".format(d.productId)}），可以在下面打开设备")
         } catch (e: Throwable) {
             usbState("连接失败: $e")
         }
+    }
+
+    /** Foreground service + wake lock + (once) the battery-optimisation exemption, so Android does not throttle the app while frames are flowing. */
+    private fun startBoost() {
+        try {
+            val i = Intent(this, PerfService::class.java)
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
+        } catch (e: Throwable) { Perf.lastError = "前台服务: $e" }
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val sp = getSharedPreferences("canvds", Context.MODE_PRIVATE)
+            if (!pm.isIgnoringBatteryOptimizations(packageName) && !sp.getBoolean("asked_battery", false)) {
+                sp.edit().putBoolean("asked_battery", true).apply()
+                runOnUiThread {
+                    AlertDialog.Builder(this).setTitle("保持后台高性能")
+                        .setMessage("为了让 CAN 传输速度稳定，建议允许 CanVDS 忽略电池优化（系统会再弹一次确认）。")
+                        .setPositiveButton("去允许") { _, _ ->
+                            try { startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, AndroidUri.parse("package:$packageName"))) } catch (_: Throwable) {}
+                        }.setNegativeButton("以后再说", null).show()
+                }
+            }
+        } catch (_: Throwable) {}
     }
 
     // ------------------------------------------------------------------ files

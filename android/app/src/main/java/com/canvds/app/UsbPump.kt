@@ -46,6 +46,7 @@ class UsbPump(private val conn: UsbDeviceConnection, private val epIn: UsbEndpoi
             freeOut.add(r)
         }
         th = Thread {
+            Perf.boostThisThread()
             while (running) {
                 val r = try { conn.requestWait(100) } catch (_: TimeoutException) { continue } catch (_: Exception) { null }
                 if (r == null) { try { Thread.sleep(2) } catch (_: InterruptedException) {}; continue }

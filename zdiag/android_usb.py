@@ -162,9 +162,22 @@ _current: Optional[AndroidUsbIO] = None
 _cur_lock = threading.Lock()
 
 
+def _install_hooks() -> None:
+    """Thread priority / ADPF boost (Perf.kt) for the threads that move CAN frames, and its status text for the diagnostics line."""
+    from . import gsusb
+    try:
+        from java import jclass
+        perf = jclass("com.canvds.app.Perf")
+        gsusb.THREAD_HOOK = lambda: perf.boostThisThread()
+        gsusb.BOOST_INFO = lambda: perf.info()
+    except Exception:
+        pass                                                           # not on Android (tests)
+
+
 def attach(conn, ifnum: int, ep_in, ep_out, present=None, reader=None, writer=None) -> None:
     """Called by the app once the permission is granted and the interface is claimed."""
     global _current
+    _install_hooks()
     with _cur_lock:
         old, _current = _current, AndroidUsbIO(conn, ifnum, ep_in, ep_out, present, reader, writer)
     if old is not None:

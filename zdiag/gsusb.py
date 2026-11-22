@@ -42,6 +42,21 @@ DLC_LEN = [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64]
 
 TX_WINDOW = int(os.environ.get("CANVDS_GS_TXWIN", "32"))      # frames that may be on their way (sent, not yet echoed) at the same time
 STALL_S = float(os.environ.get("CANVDS_GS_STALL", "1.5"))    # nothing sendable for this long -> restart the channel (stuck FIFO / bus-off)
+THREAD_HOOK: Optional[Callable[[], None]] = None             # set by the Android shell: raises the priority of the calling thread
+BOOST_INFO: Optional[Callable[[], str]] = None               # set by the Android shell: text for the status page
+_tl = threading.local()
+
+
+def _boost() -> None:
+    """Once per thread: let the platform (Android) give threads that move CAN frames a better priority."""
+    if THREAD_HOOK is not None and not getattr(_tl, "done", False):
+        _tl.done = True
+        try:
+            THREAD_HOOK()
+        except Exception:
+            pass
+
+
 TX_PACK = int(os.environ.get("CANVDS_GS_PACK", "1"))          # frames concatenated into ONE bulk write; 1 = the standard one frame per transfer
 
 
@@ -267,6 +282,7 @@ class GsUsbDevice:
 
     def __init__(self, name: str, index: int = 0, base: str = "", io: Optional[UsbIO] = None) -> None:
         self.name, self.index = name, index
+        self.proc_us = 0.0                                                 # EMA of Python time per received frame
         self.io = io or PyUsbIO(base, index)
         self.buses: Dict[int, "GsUsbBus"] = {}
         self._lock = threading.RLock()
@@ -366,6 +382,7 @@ class GsUsbDevice:
 
     # -- rx thread (one IN endpoint for all channels)
     def _rx_loop(self) -> None:
+        _boost()
         while not self._stop.is_set():
             try:
                 buf = self.io.read(1024, 20)
@@ -379,10 +396,16 @@ class GsUsbDevice:
             any_bus = next(iter(fds.values()), None)
             if any_bus is None:
                 continue
+            t0 = time.perf_counter()
+            n = 0
             for f in unpack_frames(buf, any_bus.fd_mode, any_bus.use_ts):
+                n += 1
                 b = fds.get(f["ch"])
                 if b is not None:
                     b._on_frame(f)
+            if n:                                                          # Python cost per received frame (EMA, microseconds)
+                us = (time.perf_counter() - t0) * 1e6 / n
+                self.proc_us = us if not self.proc_us else self.proc_us * 0.95 + us * 0.05
 
 
 class GsUsbBus(Bus):
@@ -506,7 +529,12 @@ class GsUsbBus(Bus):
         io = self.io
         d = dict(echo_mode=self.echo_mode, pending=pend, free=free, recoveries=self.recoveries, rx_dropped=self.q_dropped,
                  w_ok=getattr(io, "w_ok", None), w_timeouts=getattr(io, "w_timeouts", None), r_ok=getattr(io, "r_ok", None),
-                 write_ms=round(getattr(io, "w_ms", 0.0), 2), rx_queue=self._q.qsize(), events=[t for _, t in list(self.events)[-3:]])
+                 write_ms=round(getattr(io, "w_ms", 0.0), 2), rx_queue=self._q.qsize(), proc_us=round(self.device.proc_us), events=[t for _, t in list(self.events)[-3:]])
+        if BOOST_INFO is not None:
+            try:
+                d["boost"] = str(BOOST_INFO())
+            except Exception:
+                pass
         rd = getattr(io, "reader", None)
         if rd is not None:
             try:
@@ -579,6 +607,7 @@ class GsUsbBus(Bus):
             time.sleep(0.0005)
 
     def send_many(self, frames: list) -> int:
+        _boost()
         self._check()
         sent, i, n = 0, 0, len(frames)
         wf = getattr(self.io, "write_frames", None)
