@@ -121,20 +121,40 @@ class BusStats:
         self.abit, self.dbit = abit, dbit
         self.rx = self.tx = self.err = 0
         self._busy = 0.0
+        self._ratio: dict = {}
         self._lock = threading.Lock()
         self._last_t: Optional[float] = None
         self._last_busy = 0.0
         self.load: Optional[float] = None
 
+    def _cost(self, fr: CanFrame) -> float:
+        """frame_seconds() without its pure-Python CRC/bit-stuffing on every frame (~30 us on a PC, ~0.3 ms on a phone, paid for every
+        RX frame and every TX echo): classic frames are computed exactly only every 16th frame per (format, length) and the
+        measured stuffing ratio is reused in between.  CAN FD is an estimate anyway."""
+        if fr.fd:
+            return frame_seconds(fr, self.abit, self.dbit)
+        n = 0 if fr.rtr else min(len(fr.data), 8)
+        base = (54 if fr.extended else 34) + 8 * n          # SOF..CRC, the part that gets stuffed
+        key = (fr.extended, n, fr.rtr)
+        ent = self._ratio.get(key)
+        if ent is None:
+            ent = self._ratio[key] = [0, 1.2]
+        if ent[0] % 16 == 0:
+            ent[1] = (frame_seconds(fr, self.abit) * self.abit - 13) / base
+        ent[0] += 1
+        return (base * ent[1] + 13) / float(self.abit)
+
     def count_rx(self, fr: CanFrame) -> None:
+        cost = self._cost(fr)
         with self._lock:
             self.rx += 1
-            self._busy += frame_seconds(fr, self.abit, self.dbit)
+            self._busy += cost
 
     def count_tx(self, fr: CanFrame) -> None:
+        cost = self._cost(fr)
         with self._lock:
             self.tx += 1
-            self._busy += frame_seconds(fr, self.abit, self.dbit)
+            self._busy += cost
 
     def count_err(self, n: int = 1) -> None:
         with self._lock:
