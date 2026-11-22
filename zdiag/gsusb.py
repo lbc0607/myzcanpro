@@ -499,6 +499,22 @@ class GsUsbBus(Bus):
         except Exception as e:
             self._note(f"{why}，重启通道失败: {e}")
 
+    def diag(self) -> dict:
+        """Live numbers for the status page / bug reports."""
+        with self._lock:
+            pend, free = len(self._pending), len(self._free)
+        io = self.io
+        d = dict(echo_mode=self.echo_mode, pending=pend, free=free, recoveries=self.recoveries, rx_dropped=self.q_dropped,
+                 w_ok=getattr(io, "w_ok", None), w_timeouts=getattr(io, "w_timeouts", None), r_ok=getattr(io, "r_ok", None),
+                 write_ms=round(getattr(io, "w_ms", 0.0), 2), rx_queue=self._q.qsize(), events=[t for _, t in list(self.events)[-3:]])
+        rd = getattr(io, "reader", None)
+        if rd is not None:
+            try:
+                d["reader_dropped"] = int(rd.getDropped())
+            except Exception:
+                pass
+        return d
+
     def health(self) -> dict:
         d = {}
         try:

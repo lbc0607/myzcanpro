@@ -48,6 +48,7 @@ class AndroidUsbIO(UsbIO):
         self._chk = 0.0
         self._closed = False
         self.w_timeouts = self.w_ok = self.r_ok = 0
+        self.w_ms = 0.0                                        # moving average of one bulk-OUT call, milliseconds
 
     def ctrl_out(self, breq, value, data):
         d = bytes(data)
@@ -108,7 +109,9 @@ class AndroidUsbIO(UsbIO):
         d = bytes(data)
         # A timeout cancels the transfer; cancelling between the two USB packets of an 80-byte frame would leave half a frame in the device
         # and shift every following one.  So "timeout" must mean "really stuck", not "busy for a moment".
+        t0 = time.perf_counter()
         n = self.conn.bulkTransfer(self.ep_out, _jbytes(d), len(d), max(timeout_ms, 300))
+        self.w_ms += ((time.perf_counter() - t0) * 1000.0 - self.w_ms) * 0.02
         if n >= len(d):
             self.w_ok += 1
             return True

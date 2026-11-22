@@ -170,10 +170,20 @@ class Ops:
             rx, tx, err = st.snapshot() if st else (0, 0, 0)
             chans.append({"channel": n, "config": asdict(c), "summary": c.summary(), "rx": rx, "tx": tx, "errors": err,
                           "bus_load_percent": None if st is None or st.load is None else round(float(st.load), 1),
-                          "in_use_by_window": n in d.owners and n not in self._owner})
+                          "in_use_by_window": n in d.owners and n not in self._owner,
+                          "usb": self._usb_diag(d, n)})
         return {"device": d.name, "index": d.index, "is_open": d.is_open, "channels": chans,
                 "senders": self.cyclic_list()["senders"], "recording": self.ctx.dev.tap.recorder is not None,
                 "scan_dir": self.ctx.scan_dir}
+
+    @staticmethod
+    def _usb_diag(d, n):
+        c = d.chans.get(n)
+        fn = getattr(getattr(c, "bus", None), "diag", None)
+        try:
+            return fn() if callable(fn) else None
+        except Exception:
+            return None
 
     def device_list(self) -> Dict[str, Any]:
         return {"devices": list(DEVICES), "simulator": SIM_DEVICE,
