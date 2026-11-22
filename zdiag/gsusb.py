@@ -552,7 +552,11 @@ class GsUsbBus(Bus):
                 return
             if time.monotonic() > t_end:
                 self.stats.count_err()
-                raise GsUsbError("发送失败(总线关闭/发送缓冲满/无应答?)")
+                with self._lock:
+                    pend, free = len(self._pending), len(self._free)
+                raise GsUsbError("发送失败(总线关闭/发送缓冲满/无应答?) 在途=%d 空闲=%d 回显模式=%s USB写超时=%s 写成功=%s 读成功=%s"
+                                 % (pend, free, self.echo_mode, getattr(self.io, "w_timeouts", "-"), getattr(self.io, "w_ok", "-"),
+                                    getattr(self.io, "r_ok", "-")))
             time.sleep(0.0005)
 
     def send_many(self, frames: list) -> int:

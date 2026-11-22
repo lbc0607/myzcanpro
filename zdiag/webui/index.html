@@ -59,7 +59,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-all;font:12.5px/1.45 var(--mo
     <div class="seg"><button id="ft-r-send" class="on">发送</button><button id="ft-r-recv">接收</button></div>
     <label>使用的通道</label><div id="ft-ch" class="row" style="flex-wrap:wrap"></div>
     <div class="row"><div><label>块大小(字节)</label><select id="ft-chunk"><option>512</option><option selected>1024</option><option>2048</option><option>4096</option><option>8192</option></select></div>
-    <div><label>帧长度</label><select id="ft-fl"><option value="64" selected>FD 64 字节</option><option value="8">经典 8 字节</option></select></div></div>
+    <div><label>FD 帧长度(经典 CAN 通道固定 8 字节)</label><select id="ft-fl"><option value="64" selected>64 字节</option><option>48</option><option>32</option><option>24</option><option>20</option><option>16</option><option>12</option></select></div></div>
     <label>基础 CAN ID(hex，收发要一致)</label><input id="ft-base" value="6A0">
     <div id="ft-send-box">
       <button class="b" id="ft-pick">选择文件…</button>
@@ -183,11 +183,14 @@ function chanCard(i){
   const gs=/gs_usb/.test(ST.device);
   d.innerHTML=`<h3>通道 ${i}</h3>
   <div class="row"><div><label>协议</label><select class="proto"><option>CAN FD</option><option>CAN</option></select></div><div><label>仲裁域(kbps)</label><select class="br">${[1000,800,500,250,125,100,50,20,10,5].map(v=>`<option ${v==500?"selected":""}>${v}</option>`).join("")}</select></div></div>
-  <div class="row"><div><label>数据域(kbps)</label><select class="dbr">${[8000,5000,4000,2000,1000,800,500].map(v=>`<option ${v==5000?"selected":""}>${v}</option>`).join("")}</select></div><div><label>CANFD 加速</label><select class="acc"><option value="1">是</option><option value="0">否</option></select></div></div>
-  ${gs?`<div class="row"><div><label>采样点%(0=自动)</label><input class="sp" type="number" value="0" step="0.5"></div><div><label>数据域采样点%</label><input class="dsp" type="number" value="0" step="0.5"></div></div>`:""}
+  <div class="row fdonly"><div><label>数据域(kbps)</label><select class="dbr">${[8000,5000,4000,2000,1000,800,500].map(v=>`<option ${v==5000?"selected":""}>${v}</option>`).join("")}</select></div><div><label>CANFD 加速</label><select class="acc"><option value="1">是</option><option value="0">否</option></select></div></div>
+  ${gs?`<div class="row"><div><label>采样点%(0=自动)</label><input class="sp" type="number" value="0" step="0.5"></div><div class="fdonly"><label>数据域采样点%</label><input class="dsp" type="number" value="0" step="0.5"></div></div>`:""}
   <div class="chk"><input class="term" type="checkbox" checked><span>终端电阻（固件不支持时无效）</span></div>
   <div class="chk"><input class="lo" type="checkbox"><span>只听模式</span></div>
   <button class="b p go">启动通道</button><div class="stat mono" style="margin-top:8px;color:var(--muted)">未启动</div>`;
+  const sync=()=>{const fd=d.querySelector(".proto").value==="CAN FD";
+    d.querySelectorAll(".fdonly").forEach(e=>e.style.display=fd?"":"none")};
+  d.querySelector(".proto").onchange=sync;sync();
   d.querySelector(".go").onclick=()=>act(async()=>{
     const c=ST.channels.find(x=>x.channel===i);
     if(c){await call("channel_stop",{channel:i})}else{
@@ -252,10 +255,10 @@ async function pollMon(){
 
 /* ---- send ---- */
 const txP=()=>({channel:+$("#tx-ch").value,can_id:$("#tx-id").value.trim(),data:$("#tx-data").value.trim(),extended:$("#tx-ext").checked,fd:$("#tx-fd").checked});
-$("#tx-once").onclick=()=>act(async()=>{const r=await call("frame_send",{...txP(),count:Math.max(1,+$("#tx-n").value||1),interval_ms:+$("#tx-per").value||0});toast(r.ok?`已发送 ${r.sent} 帧`:`发送失败 ${r.failed} 帧`,!r.ok)});
+$("#tx-once").onclick=()=>act(async()=>{const r=await call("frame_send",{...txP(),count:Math.max(1,+$("#tx-n").value||1),interval_ms:+$("#tx-per").value||0});toast(r.ok?`已发送 ${r.sent} 帧`:`只发出 ${r.sent} 帧，失败 ${r.failed} 帧`,!r.ok)});
 $("#tx-cyc").onclick=()=>act(async()=>{const p=txP();await call("cyclic_start",{...p,key:"c"+p.can_id,period_ms:+$("#tx-per").value||100});toast("已开始周期发送");pollTx()});
 $("#tx-stop").onclick=()=>act(async()=>{try{await call("cyclic_stop")}catch(e){}pollTx()});
-async function pollTx(){try{const r=await call("cyclic_list");$("#tx-list").textContent=r.senders.length?r.senders.map(s=>`${s.key} 通道${s.channel} ${s.running?"运行中":"已结束"}`).join("\n"):"无"}catch(e){}}
+async function pollTx(){try{const r=await call("cyclic_list");$("#tx-list").textContent=r.senders.length?r.senders.map(s=>s.running?`${s.key} 通道${s.channel} ${s.frame} 运行中`:`${s.key} 已结束：发出 ${s.sent||0} 帧，失败 ${s.failed||0}${s.error?"\n  原因: "+s.error:""}`).join("\n"):"无"}catch(e){}}
 
 /* ---- diagnostics ---- */
 function dBase(){const m=$("#d-mod").value;const p={channel:+$("#d-ch").value,extended:$("#d-ext").checked,addr:$("#d-addr").value};

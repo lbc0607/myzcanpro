@@ -25,17 +25,16 @@ def _jbuf(n: int):
 
 
 def _jbytes(data: bytes):
-    try:
-        from java import jarray, jbyte
-        return jarray(jbyte)(list(b - 256 if b > 127 else b for b in data))
-    except ImportError:
-        return bytes(data)
+    """Chaquopy turns a Python bytes object into a Java byte[] by itself (one JNI call, not one per byte)."""
+    return bytes(data)
 
 
 def _pybytes(buf, n: int) -> bytes:
+    """Java byte[] -> bytes.  bytes(array) copies the whole array in one JNI call; going through list() would cost one call per element
+    and made the receive thread so slow that the echoes of our own frames came late and the send window ran dry."""
     if isinstance(buf, (bytes, bytearray)):
         return bytes(buf[:n])
-    return bytes((b & 0xFF) for b in list(buf)[:n])
+    return bytes(buf)[:n]
 
 
 class AndroidUsbIO(UsbIO):
@@ -44,8 +43,8 @@ class AndroidUsbIO(UsbIO):
         self._rbuf = None
         self._rsize = 0
         self._chk = 0.0
-        self._lock = threading.Lock()                          # UsbDeviceConnection calls are serialised per direction below
         self._closed = False
+        self.w_timeouts = self.w_ok = self.r_ok = 0
 
     def ctrl_out(self, breq, value, data):
         d = bytes(data)
@@ -77,6 +76,7 @@ class AndroidUsbIO(UsbIO):
             self._rbuf, self._rsize = _jbuf(size), size
         n = self.conn.bulkTransfer(self.ep_in, self._rbuf, size, timeout_ms)
         if n > 0:
+            self.r_ok += 1
             return _pybytes(self._rbuf, n)
         if self._gone():
             raise GsUsbError("USB 设备已拔出")
@@ -86,7 +86,9 @@ class AndroidUsbIO(UsbIO):
         d = bytes(data)
         n = self.conn.bulkTransfer(self.ep_out, _jbytes(d), len(d), timeout_ms)
         if n >= len(d):
+            self.w_ok += 1
             return True
+        self.w_timeouts += 1
         if self._gone():
             raise GsUsbError("USB 设备已拔出")
         return False
