@@ -151,6 +151,8 @@ class DeviceManager:
             io = android_usb.current()                         # on the phone the app hands over the USB connection it opened
             if io is None and android_usb.on_android():
                 raise ConnError("请先在 App 里用 USB 线连接适配器并允许 USB 权限")
+            if io is not None:
+                io.flush()                                     # frames that piled up while no device was open
             return GsUsbDevice(name, index, self.dll_dir, io=io)
         except ConnError:
             raise

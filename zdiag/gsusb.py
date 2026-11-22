@@ -41,6 +41,7 @@ ECHO_RX = 0xFFFFFFFF
 DLC_LEN = [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64]
 
 TX_WINDOW = int(os.environ.get("CANVDS_GS_TXWIN", "32"))      # frames that may be on their way (sent, not yet echoed) at the same time
+STALL_S = float(os.environ.get("CANVDS_GS_STALL", "1.5"))    # nothing sendable for this long -> restart the channel (stuck FIFO / bus-off)
 TX_PACK = int(os.environ.get("CANVDS_GS_PACK", "1"))          # frames concatenated into ONE bulk write; 1 = the standard one frame per transfer
 
 
@@ -411,6 +412,7 @@ class GsUsbBus(Bus):
         self.echo_mode: Optional[bool] = None          # None = unknown yet, True = device echoes our frames, False = it does not (loopback, some firmware)
         self._failed: Optional[str] = None
         self._recover_t = 0.0
+        self._stall_since: Optional[float] = None
         self._flags = (F_LISTEN_ONLY if cfg.listen_only else 0) | (F_FD if cfg.is_fd else 0) | (F_HW_TIMESTAMP if self.use_ts else 0)
         self._flags |= extra_flags
         if nom["feature"] & F_BERR_REPORTING:
@@ -450,6 +452,7 @@ class GsUsbBus(Bus):
     def _on_frame(self, f: dict) -> None:
         ts = self.device.host_ts(f["ts"])
         if f["echo"] != ECHO_RX:                                          # our own frame is on the bus now
+            self._stall_since = None
             with self._lock:
                 self.echo_mode = True
                 got = self._pending.pop(f["echo"], None)
@@ -592,6 +595,15 @@ class GsUsbBus(Bus):
                         self.tap.feed(self.channel, fr, "TX")
             sent += len(batch)
             i += len(batch)
+        if sent:
+            self._stall_since = None
+        elif frames:
+            now = time.monotonic()
+            if self._stall_since is None:
+                self._stall_since = now
+            elif now - self._stall_since > STALL_S:
+                self._stall_since = None
+                self._recover("发送停滞(没有回显/写入被拒绝)")
         return sent
 
     def recv(self, timeout: float) -> Optional[CanFrame]:

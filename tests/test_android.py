@@ -32,6 +32,27 @@ class FakeConn:
         return len(buf) if self.dev.write(bytes(buf), timeout) else -1
 
 
+class FakeReader:
+    """UsbReader.kt: queue of IN transfers, drained in batches as [u16 len][bytes]..."""
+    def __init__(self, dev):
+        self.dev, self.stopped = dev, False
+
+    def drain(self, timeout_ms):
+        first = self.dev.read(512, timeout_ms)
+        if first is None:
+            return None
+        parts = [first]
+        while len(parts) < 256:
+            c = self.dev.read(512, 0)
+            if c is None:
+                break
+            parts.append(c)
+        return b"".join(len(p).to_bytes(2, "little") + p for p in parts)
+
+    def stop(self):
+        self.stopped = True
+
+
 class AndroidUsb(unittest.TestCase):
     def tearDown(self):
         AU.detach()
@@ -47,6 +68,25 @@ class AndroidUsb(unittest.TestCase):
             time.sleep(0.01)
         self.assertEqual(bus.stats.tx, 1)
         dev.close()
+
+    def test_reader_batches_frames_and_close_keeps_connection(self):
+        fake = FakeUsb()
+        rd = FakeReader(fake)
+        AU.attach(FakeConn(fake), 0, "IN", "OUT", None, rd)
+        dm = DeviceManager("")
+        for _ in range(2):                                                       # open, close, open again without re-plugging
+            dm.open(GS_DEVICE, 0)
+            dm.start_channel(0, ChannelCfg(protocol="CAN FD", bitrate_kbps=500, data_kbps=2000))
+            bus = dm.chans[0].bus
+            for k in range(50):
+                fake.inject(0x100 + k, b"\x01\x02")
+            got = [bus.recv(1.0) for _ in range(50)]
+            self.assertTrue(all(g is not None for g in got))
+            self.assertEqual(bus.send_many([CanFrame(1, b"x")] * 5), 5)
+            dm.close()
+            self.assertFalse(rd.stopped)
+        AU.detach()
+        self.assertTrue(rd.stopped)
 
     def test_unplug_is_reported(self):
         gone = [False]

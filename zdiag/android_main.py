@@ -32,12 +32,12 @@ def start(home: str) -> str:
         return json.dumps(info)
 
 
-def attach_usb(conn, ifnum, ep_in, ep_out, present=None) -> None:
+def attach_usb(conn, ifnum, ep_in, ep_out, present=None, reader=None) -> None:
     from . import android_usb
     chk = None
     if present is not None:
         chk = lambda: bool(present.getAsBoolean())          # java.util.function.BooleanSupplier
-    android_usb.attach(conn, int(ifnum), ep_in, ep_out, chk)
+    android_usb.attach(conn, int(ifnum), ep_in, ep_out, chk, reader)
 
 
 def detach_usb() -> None:

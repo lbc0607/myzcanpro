@@ -238,6 +238,27 @@ class DeviceAndBus(unittest.TestCase):
         self.assertEqual(dev.ext_error, "")
         dev.close()
 
+    def test_stalled_device_is_restarted(self):
+        old = G.STALL_S
+        G.STALL_S = 0.2
+        try:
+            io = FakeUsb()
+            dev, _ = open_dev(io)
+            bus = dev.start_channel(0, ChannelCfg(protocol="CAN"), None)
+            n0 = len([c for c in io.ctrl if c[0] == G.BREQ_MODE])
+            io.paused = True                                                    # firmware stuck: every write is refused
+            fr = [CanFrame(1, b"a")]
+            self.assertEqual(bus.send_many(fr), 0)
+            time.sleep(0.3)
+            self.assertEqual(bus.send_many(fr), 0)                              # stall detected -> channel restarted (reset + start)
+            self.assertEqual(len([c for c in io.ctrl if c[0] == G.BREQ_MODE]), n0 + 2)
+            self.assertEqual(bus.recoveries, 1)
+            io.paused = False
+            self.assertEqual(bus.send_many(fr), 1)
+            dev.close()
+        finally:
+            G.STALL_S = old
+
     def test_listen_only_cannot_send(self):
         dev, _ = open_dev()
         bus = dev.start_channel(0, ChannelCfg(protocol="CAN", listen_only=True), None)

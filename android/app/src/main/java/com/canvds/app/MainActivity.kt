@@ -39,6 +39,7 @@ class MainActivity : Activity() {
     private lateinit var web: WebView
     private lateinit var usb: UsbManager
     private var device: UsbDevice? = null
+    private var reader: UsbReader? = null
     private var url = ""
     private var token = ""
     private val ids = listOf(0x1D50 to 0x606F, 0x1209 to 0x2323)
@@ -149,7 +150,9 @@ class MainActivity : Activity() {
             if (epIn == null || epOut == null) { usbState("没有找到批量传输端点（固件不是 Candlelight？）"); return }
             device = d
             val name = d.deviceName
-            py().callAttr("attach_usb", conn, intf.id, epIn, epOut, BooleanSupplier { usb.deviceList.containsKey(name) })
+            reader?.stop()
+            reader = UsbReader(conn, epIn)
+            py().callAttr("attach_usb", conn, intf.id, epIn, epOut, BooleanSupplier { usb.deviceList.containsKey(name) }, reader)
             usbState("已连接 ${d.productName ?: "CAN 适配器"}（${"%04X".format(d.vendorId)}:${"%04X".format(d.productId)}），可以在下面打开设备")
         } catch (e: Throwable) {
             usbState("连接失败: $e")
