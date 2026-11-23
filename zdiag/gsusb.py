@@ -416,6 +416,7 @@ class GsUsbBus(Bus):
     def __init__(self, device: GsUsbDevice, channel: int, cfg: ChannelCfg, tap=None, extra_flags: int = 0) -> None:
         self.device, self.channel, self.cfg, self.tap = device, channel, cfg, tap
         self.io = device.io
+        self._state_t, self._state_txt = 0.0, ""
         self.use_fd = cfg.is_fd
         self.fd_mode = cfg.is_fd
         nom, dat = device.consts[channel]
@@ -530,6 +531,16 @@ class GsUsbBus(Bus):
         d = dict(echo_mode=self.echo_mode, pending=pend, free=free, recoveries=self.recoveries, rx_dropped=self.q_dropped,
                  w_ok=getattr(io, "w_ok", None), w_timeouts=getattr(io, "w_timeouts", None), r_ok=getattr(io, "r_ok", None),
                  write_ms=round(getattr(io, "w_ms", 0.0), 2), rx_queue=self._q.qsize(), proc_us=round(self.device.proc_us), events=[t for _, t in list(self.events)[-3:]])
+        now = time.monotonic()
+        if now - self._state_t > 1.0:                                      # controller state/error counters, at most once a second
+            self._state_t = now
+            try:
+                h = self.health()
+                self._state_txt = (("总线关闭" if h.get("bus_off") else "状态=%s" % h.get("state")) + " REC=%s TEC=%s" % (h.get("rec"), h.get("tec"))) if "state" in h else ""
+            except Exception:
+                self._state_txt = ""
+        if self._state_txt:
+            d["ctrl"] = self._state_txt
         if BOOST_INFO is not None:
             try:
                 d["boost"] = str(BOOST_INFO())
