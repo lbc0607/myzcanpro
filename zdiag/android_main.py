@@ -5,6 +5,7 @@
     stop()
 The page served at "/" is zdiag/webui/index.html; the app loads  <url>/#<token>  in a WebView."""
 import json
+import sys
 import os
 import pkgutil
 import threading
@@ -19,6 +20,9 @@ def start(home: str) -> str:
             return json.dumps(_state["info"])
         os.makedirs(home, exist_ok=True)
         os.environ["CANVDS_HOME"] = home
+        # CPython hands the GIL to a waiting thread only every 5 ms by default: a timer thread (cyclic send, 1 ms period) that wakes up while
+        # the USB rx thread is busy waits up to 5 ms -> 5-6 ms spacing on the bus.  0.5 ms keeps timers close to their schedule.
+        sys.setswitchinterval(0.0005)
         from zdiag_ui.appctx import AppContext
         from .ops import Ops
         from .rpc import RpcServer
